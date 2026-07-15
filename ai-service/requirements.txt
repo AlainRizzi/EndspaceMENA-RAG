@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+asyncpg
+anthropic
+voyageai
+arq
+pydantic
+pydantic-settings
