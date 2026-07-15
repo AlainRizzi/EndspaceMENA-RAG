@@ -77,14 +77,23 @@ CREATE TABLE "AiInvocationLog" (
     id BIGSERIAL PRIMARY KEY,
     "subdomainName" text NOT NULL,
     capability text NOT NULL,
+    "contextHash" text,              -- hash of the resolved context, for EXACT cache matches
+    "cacheScope" jsonb,               -- exact-match filters a semantic hit must still satisfy (e.g. departmentId)
+    embedding vector(1024),          -- embedding of the semantic cache text (e.g. title+description), for near-duplicate matches
     "inputPayload" jsonb NOT NULL,
     "outputPayload" jsonb,
     model text,
     "promptTokens" integer,
     "completionTokens" integer,
     "latencyMs" integer,
-    status text NOT NULL,
+    status text NOT NULL,            -- SUCCESS / FAILED / EXACT_CACHE_HIT / SEMANTIC_CACHE_HIT
     "errorMessage" text,
     "createdAt" timestamp NOT NULL DEFAULT now()
 );
 CREATE INDEX ON "AiInvocationLog" ("subdomainName", capability);
+-- Fast lookup for EXACT cache matches: newest SUCCESS row for a given capability + exact context hash.
+CREATE INDEX ON "AiInvocationLog" (capability, "contextHash", "createdAt" DESC)
+    WHERE status = 'SUCCESS';
+-- Fast lookup for SEMANTIC cache matches: vector similarity search scoped to successful calls only.
+CREATE INDEX ai_invocation_log_embedding_idx ON "AiInvocationLog"
+    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50);
