@@ -26,9 +26,19 @@ CREATE TYPE "RagSourceType" AS ENUM (
 
 CREATE TYPE "RagIngestStatus" AS ENUM ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED');
 
+-- NOTE on subdomainName / organisationSlug:
+-- subdomainName is the real tenant boundary and is always required. organisationSlug
+-- is nullable and, when present, is the finer-grained scope within that tenant. These
+-- two are NEVER compared against each other as if they share one namespace (no more
+-- "scopeKey" collapsing them into a single string) - two different tenants could
+-- coincidentally reuse the same slug/subdomain string, and matching on that alone
+-- would leak one tenant's data into another's results. Every query filters
+-- subdomainName exactly first, then organisationSlug as a second, independent check.
+
 CREATE TABLE "RagSource" (
     id BIGSERIAL PRIMARY KEY,
     "subdomainName" text NOT NULL,
+    "organisationSlug" text,            -- nullable: NULL = general/subdomain-wide, set = specific to that organisation
     "sourceType" "RagSourceType" NOT NULL,
     "sourceId" text NOT NULL,
     "projectSlug" text,
@@ -44,14 +54,15 @@ CREATE TABLE "RagSource" (
     "updatedAt" timestamp NOT NULL DEFAULT now(),
     UNIQUE ("sourceType", "sourceId")
 );
-CREATE INDEX ON "RagSource" ("subdomainName");
+CREATE INDEX ON "RagSource" ("subdomainName", "organisationSlug");
 CREATE INDEX ON "RagSource" ("projectSlug");
 CREATE INDEX ON "RagSource" ("taskId");
 
 CREATE TABLE "RagChunk" (
     id BIGSERIAL PRIMARY KEY,
     "sourceId" bigint NOT NULL REFERENCES "RagSource"(id) ON DELETE CASCADE,
-    "subdomainName" text NOT NULL,
+    "subdomainName" text NOT NULL,      -- denormalized from RagSource so retrieval can filter without a join
+    "organisationSlug" text,            -- denormalized too, same nullable rule
     "chunkIndex" integer NOT NULL,
     content text NOT NULL,
     "tokenCount" integer,
@@ -61,7 +72,7 @@ CREATE TABLE "RagChunk" (
     UNIQUE ("sourceId", "chunkIndex")
 );
 CREATE INDEX rag_chunk_embedding_idx ON "RagChunk" USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
-CREATE INDEX ON "RagChunk" ("subdomainName");
+CREATE INDEX ON "RagChunk" ("subdomainName", "organisationSlug");
 
 CREATE TABLE "ProjectSummary" (
     id SERIAL PRIMARY KEY,
@@ -76,9 +87,10 @@ CREATE TABLE "ProjectSummary" (
 CREATE TABLE "AiInvocationLog" (
     id BIGSERIAL PRIMARY KEY,
     "subdomainName" text NOT NULL,
+    "organisationSlug" text,            -- nullable: same rule as RagSource/RagChunk
     capability text NOT NULL,
     "contextHash" text,              -- hash of the resolved context, for EXACT cache matches
-    "cacheScope" jsonb,               -- exact-match filters a semantic hit must still satisfy (e.g. departmentId)
+    "cacheScope" jsonb,               -- exact-match filters a semantic hit must still satisfy (e.g. skill list)
     embedding vector(1024),          -- embedding of the semantic cache text (e.g. title+description), for near-duplicate matches
     "inputPayload" jsonb NOT NULL,
     "outputPayload" jsonb,
@@ -90,9 +102,9 @@ CREATE TABLE "AiInvocationLog" (
     "errorMessage" text,
     "createdAt" timestamp NOT NULL DEFAULT now()
 );
-CREATE INDEX ON "AiInvocationLog" ("subdomainName", capability);
--- Fast lookup for EXACT cache matches: newest SUCCESS row for a given capability + exact context hash.
-CREATE INDEX ON "AiInvocationLog" (capability, "contextHash", "createdAt" DESC)
+CREATE INDEX ON "AiInvocationLog" ("subdomainName", "organisationSlug", capability);
+-- Fast lookup for EXACT cache matches: newest SUCCESS row for a given capability + tenant + exact context hash.
+CREATE INDEX ON "AiInvocationLog" (capability, "subdomainName", "contextHash", "createdAt" DESC)
     WHERE status = 'SUCCESS';
 -- Fast lookup for SEMANTIC cache matches: vector similarity search scoped to successful calls only.
 CREATE INDEX ai_invocation_log_embedding_idx ON "AiInvocationLog"
