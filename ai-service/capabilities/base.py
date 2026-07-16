@@ -64,11 +64,9 @@ class AiCapability(ABC):
         """
         return {}
 
-    async def run(self, input: BaseModel, subdomain_name: str, organisation_slug: str | None) -> RunResult:
-        """subdomainName and organisationSlug are passed through raw (never merged
-        into one comparable string) so cache lookups always match subdomainName
-        exactly first, with organisationSlug checked as a second, independent
-        condition. See logging_service for why this matters for tenant isolation.
+    async def run(self, input: BaseModel, organisation_slug: str) -> RunResult:
+        """organisationSlug (Organisation.slug) is the tenant boundary - unique
+        across the database, so cache lookups key on it alone.
         """
         context = await self.gather_context(input)
 
@@ -80,16 +78,16 @@ class AiCapability(ABC):
         # 1. Exact match — cheapest, no embedding call needed.
         if context_hash is not None:
             cached = await get_exact_cached_result(
-                self.name, subdomain_name, organisation_slug, context_hash, self.cache_ttl_seconds
+                self.name, organisation_slug, context_hash, self.cache_ttl_seconds
             )
             if cached is not None:
                 return RunResult(self.output_schema().model_validate(cached), {}, context_hash, cache_scope, None, "EXACT_CACHE_HIT")
 
-        # 2. Semantic match — catches "similar wording, not identical," same tenant + organisation.
+        # 2. Semantic match — catches "similar wording, not identical," same organisation.
         if self.semantic_cache_similarity_threshold is not None and embedding_text:
             embedding = await retrieval_service.embed(embedding_text)
             cached = await get_semantic_cached_result(
-                self.name, subdomain_name, organisation_slug, embedding, cache_scope,
+                self.name, organisation_slug, embedding, cache_scope,
                 self.semantic_cache_similarity_threshold, self.cache_ttl_seconds,
             )
             if cached is not None:
