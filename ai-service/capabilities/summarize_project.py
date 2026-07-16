@@ -26,10 +26,7 @@ class SummarizeProjectCapability(AiCapability):
                 input.projectId,
             )
 
-        # Pulls both tiers together: general/subdomain-wide documents plus this
-        # organisation's own documents, ranked by relevance in one search.
         chunks = await retrieval_service.search(
-            subdomain_name=input.subdomainName,
             organisation_slug=input.organisationSlug,
             project_slug=input.projectSlug,
             query="project status, decisions, blockers, key documents",

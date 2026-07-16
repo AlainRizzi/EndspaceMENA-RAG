@@ -19,24 +19,16 @@ class RetrievalService:
 
     async def search(
         self,
-        subdomain_name: str,
-        organisation_slug: str | None,
+        organisation_slug: str,
         query: str,
         project_slug: str | None = None,
         task_id: int | None = None,
         source_types: list[str] | None = None,
         top_k: int = 20,
     ) -> list[dict]:
-        """Searches BOTH tiers together: general content (organisationSlug IS NULL)
-        plus this organisation's specific content, ranked together by similarity.
-
-        subdomainName is ALWAYS required to match exactly first - this is the real
-        tenant boundary. organisationSlug is then checked as a second, independent
-        condition WITHIN that confirmed subdomain. We deliberately do NOT compare
-        subdomainName and organisationSlug values against each other as if they
-        share one namespace (e.g. via the scopeKey column) - two different tenants
-        could coincidentally have matching slug/subdomain strings, and matching on
-        that alone would leak one tenant's data into another's search results.
+        """organisationSlug is the tenant boundary - Organisation.slug is unique
+        across the whole database, so it's a safe standalone key without needing
+        subdomainName as a second condition.
         """
         query_embedding = await self.embed(query)
         embedding_str = str(query_embedding)
@@ -49,16 +41,14 @@ class RetrievalService:
                        1 - (rc.embedding <=> $1::vector) AS similarity
                 FROM "RagChunk" rc
                 JOIN "RagSource" rs ON rs.id = rc."sourceId"
-                WHERE rc."subdomainName" = $2
-                  AND (rc."organisationSlug" IS NULL OR rc."organisationSlug" = $3)
-                  AND ($4::text IS NULL OR rs."projectSlug" = $4)
-                  AND ($5::int IS NULL OR rs."taskId" = $5)
-                  AND ($6::text[] IS NULL OR rs."sourceType"::text = ANY($6))
+                WHERE rc."organisationSlug" = $2
+                  AND ($3::text IS NULL OR rs."projectSlug" = $3)
+                  AND ($4::int IS NULL OR rs."taskId" = $4)
+                  AND ($5::text[] IS NULL OR rs."sourceType"::text = ANY($5))
                 ORDER BY rc.embedding <=> $1::vector
-                LIMIT $7
+                LIMIT $6
                 """,
                 embedding_str,
-                subdomain_name,
                 organisation_slug,
                 project_slug,
                 task_id,

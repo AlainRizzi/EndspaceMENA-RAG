@@ -4,8 +4,7 @@ from pydantic import BaseModel
 # --- suggest_skills ---
 
 class SuggestSkillsInput(BaseModel):
-    subdomainName: str
-    organisationSlug: str | None = None
+    organisationSlug: str
     title: str
     description: str
     departmentId: int
@@ -24,8 +23,7 @@ class SkillSuggestionResult(BaseModel):
 # --- summarize_project ---
 
 class SummarizeProjectInput(BaseModel):
-    subdomainName: str
-    organisationSlug: str | None = None
+    organisationSlug: str
     projectId: int
     projectSlug: str
 

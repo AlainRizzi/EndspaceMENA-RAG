@@ -6,3 +6,6 @@ voyageai
 arq
 pydantic
 pydantic-settings
+boto3
+pypdf
+python-docx
