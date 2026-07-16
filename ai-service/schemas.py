@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class SuggestSkillsInput(BaseModel):
     subdomainName: str
+    organisationSlug: str | None = None
     title: str
     description: str
     departmentId: int
@@ -24,6 +25,7 @@ class SkillSuggestionResult(BaseModel):
 
 class SummarizeProjectInput(BaseModel):
     subdomainName: str
+    organisationSlug: str | None = None
     projectId: int
     projectSlug: str
 

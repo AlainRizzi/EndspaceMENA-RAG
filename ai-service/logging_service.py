@@ -1,0 +1,142 @@
+import hashlib
+import json
+
+from db import get_pool
+
+
+def compute_context_hash(context: dict) -> str:
+    """Deterministic hash of a capability's resolved context (title, description,
+    the actual skill names fetched, etc.) - NOT the raw input. Hashing the resolved
+    context means the cache naturally invalidates if the underlying data changes
+    (e.g. someone adds a new skill to the department), without any manual bookkeeping.
+    """
+    normalized = json.dumps(context, sort_keys=True, default=str)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+async def get_exact_cached_result(
+    capability: str,
+    subdomain_name: str,
+    organisation_slug: str | None,
+    context_hash: str,
+    ttl_seconds: int | None,
+) -> dict | None:
+    """Literal duplicate check: same capability, same tenant/organisation, byte-for-byte
+    same resolved context. subdomainName must match exactly; organisationSlug uses
+    IS NOT DISTINCT FROM so NULL-vs-NULL counts as a match too (both "general" calls),
+    but a NULL never matches a real value or vice versa.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT "outputPayload"
+            FROM "AiInvocationLog"
+            WHERE capability = $1
+              AND "subdomainName" = $2
+              AND "organisationSlug" IS NOT DISTINCT FROM $3
+              AND "contextHash" = $4
+              AND status IN ('SUCCESS', 'SEMANTIC_CACHE_HIT')
+              AND ($5::int IS NULL OR "createdAt" > now() - ($5 || ' seconds')::interval)
+            ORDER BY "createdAt" DESC
+            LIMIT 1
+            """,
+            capability,
+            subdomain_name,
+            organisation_slug,
+            context_hash,
+            ttl_seconds,
+        )
+        return json.loads(row["outputPayload"]) if row and row["outputPayload"] else None
+
+
+async def get_semantic_cached_result(
+    capability: str,
+    subdomain_name: str,
+    organisation_slug: str | None,
+    embedding: list[float],
+    scope: dict,
+    similarity_threshold: float,
+    ttl_seconds: int | None,
+) -> dict | None:
+    """Near-duplicate check: is there a past successful call for this capability,
+    same tenant + organisation (strict match, not the "general OR mine" broadening
+    used in retrieval), whose title/description embedding is close enough, AND whose
+    exact-match scope fields (e.g. skill list) agree?
+
+    subdomainName always matches exactly; organisationSlug uses IS NOT DISTINCT FROM,
+    same reasoning as get_exact_cached_result. We never compare subdomainName and
+    organisationSlug values against each other as one namespace - two different
+    tenants could coincidentally share a slug/subdomain string.
+    """
+    embedding_str = str(embedding)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT "outputPayload", 1 - (embedding <=> $1::vector) AS similarity
+            FROM "AiInvocationLog"
+            WHERE capability = $2
+              AND "subdomainName" = $3
+              AND "organisationSlug" IS NOT DISTINCT FROM $4
+              AND status IN ('SUCCESS', 'EXACT_CACHE_HIT')
+              AND embedding IS NOT NULL
+              AND "cacheScope" = $5::jsonb
+              AND ($6::int IS NULL OR "createdAt" > now() - ($6 || ' seconds')::interval)
+            ORDER BY embedding <=> $1::vector
+            LIMIT 1
+            """,
+            embedding_str,
+            capability,
+            subdomain_name,
+            organisation_slug,
+            json.dumps(scope, sort_keys=True),
+            ttl_seconds,
+        )
+        if row is None or row["similarity"] < similarity_threshold:
+            return None
+        return json.loads(row["outputPayload"]) if row["outputPayload"] else None
+
+
+async def log_invocation(
+    subdomain_name: str,
+    organisation_slug: str | None,
+    capability: str,
+    input_payload: dict,
+    output_payload: dict | None,
+    usage: dict | None,
+    status: str,
+    context_hash: str | None = None,
+    cache_scope: dict | None = None,
+    embedding: list[float] | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Every capability call (current and future) logs here.
+    Gives you cost tracking, debugging context, exact + semantic cache lookups, and
+    prompt-eval data for free across every AI feature without extra work per feature.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO "AiInvocationLog"
+                ("subdomainName", "organisationSlug", capability, "contextHash", "cacheScope", embedding,
+                 "inputPayload", "outputPayload", model, "promptTokens", "completionTokens",
+                 "latencyMs", status, "errorMessage")
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::vector, $7::jsonb, $8::jsonb, $9, $10, $11, $12, $13, $14)
+            """,
+            subdomain_name,
+            organisation_slug,
+            capability,
+            context_hash,
+            json.dumps(cache_scope, sort_keys=True) if cache_scope is not None else None,
+            str(embedding) if embedding is not None else None,
+            json.dumps(input_payload),
+            json.dumps(output_payload) if output_payload is not None else None,
+            usage.get("model") if usage else None,
+            usage.get("promptTokens") if usage else None,
+            usage.get("completionTokens") if usage else None,
+            usage.get("latencyMs") if usage else None,
+            status,
+            error_message,
+        )
