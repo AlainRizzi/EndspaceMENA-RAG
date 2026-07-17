@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     embedding_model: str = "voyage-3"
     embedding_dimensions: int = 1024
 
+    aws_access_key_id: str
+    aws_access_key_secret: str
+    aws_region: str = "ap-southeast-2"
+    s3_bucket_name: str
+
     class Config:
         env_file = ".env"
 
