@@ -74,6 +74,11 @@ async def get_job_status(job_id: str):
     status = await job.status()
 
     if str(status) == "JobStatus.complete":
-        result = await job.result(timeout=1)
+        try:
+            result = await job.result(timeout=1)
+        except Exception as e:
+            # job.result() re-raises whatever exception the worker's job function
+            # raised - surface it as detail instead of a bare 500 with no context.
+            raise HTTPException(status_code=500, detail=f"Job failed: {e}")
         return {"status": "COMPLETED", "result": result}
     return {"status": str(status).replace("JobStatus.", "").upper()}

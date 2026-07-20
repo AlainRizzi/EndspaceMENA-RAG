@@ -18,7 +18,13 @@ class SummarizeProjectCapability(AiCapability):
         pool = await get_pool()
         async with pool.acquire() as conn:
             tasks = await conn.fetch(
-                'SELECT title, status FROM "Task" WHERE "projectId" = $1', input.projectId
+                """
+                SELECT t.name, s.name AS status
+                FROM "Task" t
+                LEFT JOIN "Status" s ON s.id = t."statusId"
+                WHERE t."projectSlug" = $1
+                """,
+                input.projectSlug,
             )
 
         chunks = await retrieval_service.search(
@@ -31,7 +37,7 @@ class SummarizeProjectCapability(AiCapability):
         return {"tasks": tasks, "chunks": chunks}
 
     def build_prompt(self, context: dict) -> str:
-        tasks_text = "\n".join(f"- {t['title']} ({t['status']})" for t in context["tasks"])
+        tasks_text = "\n".join(f"- {t['name']} ({t['status'] or 'no status'})" for t in context["tasks"])
         chunks_text = "\n\n".join(c["content"] for c in context["chunks"])
 
         return f"""Summarize the current state of this project.

@@ -7,7 +7,6 @@ class SuggestSkillsInput(BaseModel):
     organisationSlug: str
     title: str
     description: str
-    departmentId: int
 
 
 class SubtaskSuggestion(BaseModel):
@@ -24,7 +23,6 @@ class SkillSuggestionResult(BaseModel):
 
 class SummarizeProjectInput(BaseModel):
     organisationSlug: str
-    projectId: int
     projectSlug: str
 
 

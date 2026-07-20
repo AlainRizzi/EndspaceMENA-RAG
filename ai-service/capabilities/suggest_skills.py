@@ -19,15 +19,15 @@ class SuggestSkillsCapability(AiCapability):
         return f"{context['title']}\n{context['description']}"
 
     def cache_scope_fields(self, context: dict) -> dict:
-        # Same wording in a different department should NOT reuse an answer built
-        # around a different skill list — so departmentId must still match exactly.
+        # Same wording in a different organisation should NOT reuse an answer built
+        # around a different skill list — so the skill set must still match exactly.
         return {"skills": sorted(context["skills"])}
 
     async def gather_context(self, input: SuggestSkillsInput) -> dict:
         pool = await get_pool()
         async with pool.acquire() as conn:
             skills = await conn.fetch(
-                'SELECT name FROM "Skill" WHERE "departmentId" = $1', input.departmentId
+                'SELECT name FROM "Skill" WHERE "organisationSlug" = $1', input.organisationSlug
             )
         return {
             "title": input.title,
@@ -39,7 +39,7 @@ class SuggestSkillsCapability(AiCapability):
         skills_list = ", ".join(context["skills"]) or "none listed"
         return f"""Task title: {context['title']}
 Task description: {context['description']}
-Available skills in this department: {skills_list}
+Available skills in this organisation: {skills_list}
 
 Break this task into the subtasks needed to complete it. For each subtask, note which
 of the available skills (if any) it requires. Only suggest skills from the list given."""

@@ -1,10 +1,13 @@
 import asyncio
 import json
+import logging
 
 import boto3
 
 from config import settings
 from db import get_pool
+
+logger = logging.getLogger("retrieval_service")
 
 
 class RetrievalService:
@@ -118,11 +121,18 @@ class RetrievalService:
         if not candidates:
             return []
 
-        reranked = await self.rerank(query, [c["content"] for c in candidates], top_n=top_k)
-        return [
-            {**candidates[r["index"]], "relevanceScore": r["relevanceScore"]}
-            for r in reranked
-        ]
+        try:
+            reranked = await self.rerank(query, [c["content"] for c in candidates], top_n=top_k)
+            return [
+                {**candidates[r["index"]], "relevanceScore": r["relevanceScore"]}
+                for r in reranked
+            ]
+        except Exception:
+            # Rerank is an enhancement over the pgvector ordering, not a hard
+            # requirement - if the Bedrock Rerank call fails (e.g. missing IAM
+            # permission), fall back to the candidates as pgvector ranked them.
+            logger.warning("rerank failed, falling back to vector-similarity order", exc_info=True)
+            return candidates[:top_k]
 
 
 retrieval_service = RetrievalService()
