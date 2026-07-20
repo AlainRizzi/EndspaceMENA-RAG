@@ -8,6 +8,7 @@ from chunking import chunk_text
 from config import settings
 from db import get_pool
 from retrieval_service import retrieval_service
+from rich_text import extract_plain_text
 from s3_client import fetch_and_extract
 
 logger = logging.getLogger("ingest")
@@ -202,6 +203,23 @@ _TEXT_SOURCES: list[dict[str, Any]] = [
         "row_to_source": lambda r: SourceRow(
             "OBJECTIVE", str(r["id"]), r["organisationSlug"],
             None, None, None, r["userId"], None, content=r["detail"],
+        ),
+    },
+    {
+        # content is Slate/Plate rich-text jsonb with no precomputed plain-text
+        # column (unlike Announcement) - extract_plain_text handles that shape.
+        "source_type": "ACTIVITY_LOG",
+        "query": (
+            'SELECT ta.id, p."organisationSlug", t."projectSlug", ta."taskId", ta.content '
+            'FROM "TaskActivity" ta '
+            'JOIN "Task" t ON t.id = ta."taskId" '
+            'JOIN "Project" p ON p.slug = t."projectSlug" '
+            'WHERE p."organisationSlug" IS NOT NULL'
+        ),
+        "row_to_source": lambda r: SourceRow(
+            "ACTIVITY_LOG", str(r["id"]), r["organisationSlug"],
+            r["projectSlug"], r["taskId"], None, None, None,
+            content=extract_plain_text(r["content"]),
         ),
     },
 ]
