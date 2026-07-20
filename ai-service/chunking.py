@@ -1,13 +1,11 @@
-import voyageai
-
-from config import settings
+import tiktoken
 
 CHUNK_SIZE_TOKENS = 500
 CHUNK_OVERLAP_TOKENS = 50
 
-# Tokenizer encode/decode run locally (HF tokenizer, cached after first download) -
-# no live API call or valid API key needed, unlike embed()/rerank().
-_tokenizer = voyageai.Client(api_key=settings.voyage_api_key).tokenizer(model=settings.embedding_model)
+# cl100k_base isn't Titan's exact tokenizer (Bedrock doesn't expose one locally),
+# but it's a reasonable approximation for sizing chunks and runs fully offline.
+_tokenizer = tiktoken.get_encoding("cl100k_base")
 
 
 def chunk_text(
@@ -17,7 +15,7 @@ def chunk_text(
     if not text:
         return []
 
-    token_ids = _tokenizer.encode(text).ids
+    token_ids = _tokenizer.encode(text)
 
     chunks = []
     start = 0

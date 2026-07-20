@@ -61,7 +61,7 @@ CREATE TABLE "RagChunk" (
     "chunkIndex" integer NOT NULL,
     content text NOT NULL,
     "tokenCount" integer,
-    embedding vector(1024),  -- dimension must match your embedding model (voyage-3 = 1024)
+    embedding vector(1024),  -- dimension must match your embedding model (Titan Embed Text v2 = 1024)
     metadata jsonb,
     "createdAt" timestamp NOT NULL DEFAULT now(),
     UNIQUE ("sourceId", "chunkIndex")

@@ -1,4 +1,7 @@
-import voyageai
+import asyncio
+import json
+
+import boto3
 
 from config import settings
 from db import get_pool
@@ -11,11 +14,23 @@ class RetrievalService:
     """
 
     def __init__(self) -> None:
-        self.embed_client = voyageai.AsyncClient(api_key=settings.voyage_api_key)
+        self.bedrock_client = boto3.client(
+            "bedrock-runtime",
+            aws_access_key_id=settings.aws_access_key_id,
+            aws_secret_access_key=settings.aws_access_key_secret,
+            region_name=settings.aws_region,
+        )
+
+    def _invoke_embed(self, text: str) -> list[float]:
+        # boto3 has no async client - runs in a thread via asyncio.to_thread below.
+        response = self.bedrock_client.invoke_model(
+            modelId=settings.embedding_model,
+            body=json.dumps({"inputText": text, "dimensions": settings.embedding_dimensions}),
+        )
+        return json.loads(response["body"].read())["embedding"]
 
     async def embed(self, text: str) -> list[float]:
-        result = await self.embed_client.embed([text], model=settings.embedding_model)
-        return result.embeddings[0]
+        return await asyncio.to_thread(self._invoke_embed, text)
 
     async def search(
         self,

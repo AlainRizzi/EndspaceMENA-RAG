@@ -5,9 +5,8 @@ class Settings(BaseSettings):
     database_url: str
     redis_url: str = "redis://localhost:6379"
     gemini_api_key: str
-    voyage_api_key: str
     llm_model: str = "gemini-3.1-flash-lite"
-    embedding_model: str = "voyage-3"
+    embedding_model: str = "amazon.titan-embed-text-v2:0"
     embedding_dimensions: int = 1024
 
     aws_access_key_id: str
