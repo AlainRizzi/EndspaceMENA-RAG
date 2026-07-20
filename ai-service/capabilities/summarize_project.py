@@ -20,11 +20,6 @@ class SummarizeProjectCapability(AiCapability):
             tasks = await conn.fetch(
                 'SELECT title, status FROM "Task" WHERE "projectId" = $1', input.projectId
             )
-            audit_entries = await conn.fetch(
-                'SELECT * FROM audit."Audit" WHERE "parentModelId" = $1 '
-                'ORDER BY "createdAt" DESC LIMIT 50',
-                input.projectId,
-            )
 
         chunks = await retrieval_service.search(
             organisation_slug=input.organisationSlug,
@@ -33,22 +28,16 @@ class SummarizeProjectCapability(AiCapability):
             top_k=20,
         )
 
-        return {"tasks": tasks, "audit": audit_entries, "chunks": chunks}
+        return {"tasks": tasks, "chunks": chunks}
 
     def build_prompt(self, context: dict) -> str:
         tasks_text = "\n".join(f"- {t['title']} ({t['status']})" for t in context["tasks"])
-        audit_text = "\n".join(
-            f"- {a['action']} on {a['model']}: {a.get('new', '')}" for a in context["audit"]
-        )
         chunks_text = "\n\n".join(c["content"] for c in context["chunks"])
 
         return f"""Summarize the current state of this project.
 
 Tasks:
 {tasks_text or "(none)"}
-
-Recent activity:
-{audit_text or "(none)"}
 
 Relevant document excerpts:
 {chunks_text or "(none)"}
