@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from arq import create_pool
 from arq.connections import RedisSettings
 from arq.jobs import Job
@@ -7,8 +9,6 @@ from capabilities.registry import CAPABILITIES
 from config import settings
 from db import close_pool
 from logging_service import log_invocation
-
-app = FastAPI(title="GraySync AI Service")
 
 _redis_pool = None
 
@@ -20,9 +20,13 @@ async def get_redis():
     return _redis_pool
 
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
     await close_pool()
+
+
+app = FastAPI(title="GraySync AI Service", lifespan=lifespan)
 
 
 @app.post("/ai/{capability_name}")
