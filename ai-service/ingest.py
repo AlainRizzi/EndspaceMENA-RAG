@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from chunking import chunk_text
+from config import settings
 from db import get_pool
 from retrieval_service import retrieval_service
 from s3_client import fetch_and_extract
@@ -230,8 +231,17 @@ async def _resolve_document_source(spec: dict, row: dict) -> SourceRow:
     return source
 
 
+def _is_preprod_url(file_url: str) -> bool:
+    # Only ingest documents actually stored in the preprod S3 bucket - the
+    # ingestion IAM user has no access to (and this shouldn't touch) prod data.
+    return f"{settings.s3_bucket_name}.s3." in file_url
+
+
 async def _iter_document_sources(spec: dict):
     for row in await _fetch_rows(spec):
+        if not _is_preprod_url(row["fileUrl"]):
+            logger.info("skipping non-preprod document %s %s", spec["source_type"], row["id"])
+            continue
         yield await _resolve_document_source(spec, row)
 
 
@@ -333,6 +343,36 @@ async def ingest_source(source: SourceRow) -> None:
         raise
 
 
+async def _prune_deleted(source_type: str, seen_source_ids: set[str]) -> None:
+    """Removes RagSource (and cascading RagChunk) rows for this source_type whose
+    underlying DB row no longer exists - ingest_all only ever sees rows that are
+    still present in Postgres, so anything in RagSource but absent from
+    seen_source_ids was deleted (or, for fan-out types like COMPANY_DOCUMENT,
+    its org link was removed) since the last run.
+
+    Skips entirely when seen_source_ids is empty - an empty result more likely
+    means the source table is genuinely empty or the fetch failed than that every
+    row was deleted since the last run, and wiping the whole source_type on that
+    ambiguity would be far worse than leaving stale rows for one cycle.
+    """
+    if not seen_source_ids:
+        return
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        deleted = await conn.fetch(
+            """
+            DELETE FROM "RagSource"
+            WHERE "sourceType" = $1::"RagSourceType"
+              AND NOT ("sourceId" = ANY($2::text[]))
+            RETURNING "sourceId"
+            """,
+            source_type, list(seen_source_ids),
+        )
+    if deleted:
+        logger.info("pruned %d deleted %s source(s)", len(deleted), source_type)
+
+
 async def ingest_all(source_types: list[str] | None = None, concurrency: int = 4) -> None:
     specs = [s for s in (*_DOCUMENT_SOURCES, *_TEXT_SOURCES) if not source_types or s["source_type"] in source_types]
     semaphore = asyncio.Semaphore(concurrency)
@@ -344,14 +384,19 @@ async def ingest_all(source_types: list[str] | None = None, concurrency: int = 4
             except Exception:
                 logger.exception("ingest failed for %s %s", source.source_type, source.source_id)
 
-    tasks = []
     for spec in specs:
         is_document = spec in _DOCUMENT_SOURCES
         iterator = _iter_document_sources(spec) if is_document else _iter_text_sources(spec)
+
+        seen_source_ids: set[str] = set()
+        tasks = []
         async for source in iterator:
+            seen_source_ids.add(source.source_id)
             tasks.append(asyncio.create_task(_run(source)))
-    if tasks:
-        await asyncio.gather(*tasks)
+        if tasks:
+            await asyncio.gather(*tasks)
+
+        await _prune_deleted(spec["source_type"], seen_source_ids)
 
 
 if __name__ == "__main__":
