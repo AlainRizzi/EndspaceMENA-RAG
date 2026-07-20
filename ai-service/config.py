@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     llm_model: str = "gemini-3.1-flash-lite"
     embedding_model: str = "amazon.titan-embed-text-v2:0"
     embedding_dimensions: int = 1024
+    rerank_model: str = "cohere.rerank-v3-5:0"
 
     aws_access_key_id: str
     aws_access_key_secret: str

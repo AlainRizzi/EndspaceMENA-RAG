@@ -299,22 +299,38 @@ async def _replace_chunks(conn, source_id: int, organisation_slug: str, chunks: 
 async def ingest_source(source: SourceRow) -> None:
     checksum = hashlib.sha256((source.content or "").encode("utf-8")).hexdigest()
     pool = await get_pool()
+
+    if source.content is None:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await _upsert_source(conn, source, checksum, "FAILED", "no extractable content")
+        return
+
+    # PROCESSING commits on its own so it's durable even if chunking/embedding
+    # fails below - a failure must leave a FAILED row with an error message,
+    # not roll back to no row at all (a single transaction would erase both).
     async with pool.acquire() as conn:
         async with conn.transaction():
-            if source.content is None:
-                await _upsert_source(conn, source, checksum, "FAILED", "no extractable content")
-                return
-
             source_id, changed = await _upsert_source(conn, source, checksum, "PROCESSING", None)
-            if not changed:
-                return  # content identical to last ingest - chunks are already current
+    if not changed:
+        return  # content identical to last ingest - chunks are already current
 
-            chunks = chunk_text(source.content)
-            await _replace_chunks(conn, source_id, source.organisation_slug, chunks)
+    try:
+        chunks = chunk_text(source.content)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await _replace_chunks(conn, source_id, source.organisation_slug, chunks)
+                await conn.execute(
+                    'UPDATE "RagSource" SET status = $1::"RagIngestStatus" WHERE id = $2',
+                    "COMPLETED", source_id,
+                )
+    except Exception as e:
+        async with pool.acquire() as conn:
             await conn.execute(
-                'UPDATE "RagSource" SET status = $1::"RagIngestStatus" WHERE id = $2',
-                "COMPLETED", source_id,
+                'UPDATE "RagSource" SET status = $1::"RagIngestStatus", "errorMessage" = $2 WHERE id = $3',
+                "FAILED", str(e), source_id,
             )
+        raise
 
 
 async def ingest_all(source_types: list[str] | None = None, concurrency: int = 4) -> None:
