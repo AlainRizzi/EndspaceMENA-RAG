@@ -9,3 +9,5 @@ pydantic-settings
 boto3
 pypdf
 python-docx
+langgraph
+langgraph-checkpoint-postgres
