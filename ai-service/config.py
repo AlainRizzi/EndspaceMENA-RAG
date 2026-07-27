@@ -3,6 +3,10 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     database_url: str
+    # Separate, least-privilege connection for the text-to-SQL tool - a
+    # different role (ai_readonly, see schema.sql) than database_url's, which
+    # is why it needs its own DSN rather than reusing database_url's pool.
+    ai_readonly_database_url: str
     redis_url: str = "redis://localhost:6379"
     gemini_api_key: str
     llm_model: str = "gemini-3.1-flash-lite"

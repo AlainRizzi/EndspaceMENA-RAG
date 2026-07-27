@@ -11,3 +11,5 @@ pypdf
 python-docx
 langgraph
 langgraph-checkpoint-postgres
+psycopg[binary]
+sqlglot
