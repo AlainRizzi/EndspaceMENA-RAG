@@ -36,6 +36,30 @@ v_staff_note(id, userId, note, createdAt, organisationSlug)
 v_goal(id, title, startDate, endDate, status, progress, userId, organisationSlug)
 v_objective(id, detail, done, goalId, organisationSlug)
 
+Enum columns only ever contain these exact UPPERCASE values - never guess or
+invent a value (e.g. never write 'paid' or 'Paid'; the real value is 'PAID'):
+- v_project.status: ACTIVE, INACTIVE
+- v_project.priority: PREMIUM, BASIC
+- v_project.type: BILLABLE, UNBILLABLE
+- v_invoice.paymentStatus: DRAFT, AWAITING, OVERDUE, PAID, UNPAID, CANCELLED, VOIDED, REPEATING, PARTIALLY_PAID
+- v_invoice.type / v_expense.action uses ServiceType or ExpenseAction respectively - see below
+- v_expense.action: UNPAID, PAID, DEPOSIT, DRAFT, WAITING_FOR_APPROVAL
+- v_scope.status: ACTIVE, LOST, DIFFER, WON
+- v_scope.type / v_task.taskType: ONE_OFF, RECURRING, EXPENSE, MEDIA
+- v_announcement.status: DRAFT, PUBLISHED, HIDDEN, ARCHIVED
+- v_announcement.type: POST, EVENT
+- v_company_contact.companyType: BUSINESS_CORPORATION, INTERNAL_ORGANISATION, SOLE_PROPRIETORSHIP, NON_PROFIT_CORPORATION
+- v_company_contact.status: COMPLETED, ACTIVE, INACTIVE
+- v_contact.type: COMPANY, SUPPLIER, MEDIA_VENDOR
+- v_staff.employmentStatus: FULL_TIME, PART_TIME, CONTRACTOR, OTHER, TERMINATED
+- v_leave_request.status: APPROVED, CANCELLED, REJECTED, WAITING
+- v_leave_request.durationUnit / v_leave_policy.entitlementUnit: HOURS, DAYS, WEEKS, MONTHS, YEARS
+- v_feedback_submission.status: PENDING, COMPLETED
+- v_goal.status: IN_PROGRESS, COMPLETED, CLOSED, OVERDUE
+Note: v_task.status is free-text (a status name like "In Progress"), not one
+of these fixed enums - use ILIKE or check plausible values, don't assume
+an exact fixed set for it.
+
 Notes:
 - v_staff intentionally has no salary/compensation columns - never claim or
   compute one; if asked, say that data isn't available through this tool.
@@ -64,6 +88,11 @@ async def generate_sql(question: str) -> str:
 question, using ONLY the views listed below. Never invent columns or tables.
 Never add WHERE clauses for organisationSlug/userId - visibility is already
 enforced by the views themselves.
+
+Every mixed-case column name below (e.g. projectSlug, organisationSlug,
+createdAt) MUST be double-quoted exactly as shown (e.g. "projectSlug") in the
+query - Postgres silently lowercases unquoted identifiers, which would break
+the reference. Lowercase columns like id, name, status need no quoting.
 
 {_SCHEMA_DESCRIPTION}
 

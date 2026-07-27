@@ -5,7 +5,11 @@ from pydantic import BaseModel
 
 class PlannedStep(BaseModel):
     tool: str
-    args: dict
+    # JSON-encoded object, e.g. '{"project_slug": "yeni-gate"}' - Gemini's
+    # Developer API structured-output mode rejects an open-ended dict/
+    # additionalProperties field, so args travels as a string and gets
+    # json.loads'd by the caller (see chat/graph.py) instead.
+    args_json: str
     rationale: str
 
 

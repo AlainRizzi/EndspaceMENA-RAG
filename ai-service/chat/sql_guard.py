@@ -13,6 +13,28 @@ ALLOWED_VIEWS = {
     "v_feedback", "v_feedback_submission", "v_staff_note", "v_goal", "v_objective",
 }
 
+# Every mixed-case column across the views above. Postgres lowercases
+# unquoted identifiers, so an LLM-generated query that writes projectSlug
+# instead of "projectSlug" silently breaks (UndefinedColumnError, or worse,
+# silently matches nothing). Rather than relying on prompt wording alone
+# (unreliable - confirmed empirically, Gemini quotes inconsistently across
+# a single query), every Column identifier matching one of these names
+# case-insensitively gets force-quoted with the correct casing below.
+_MIXED_CASE_COLUMNS = {
+    "organisationSlug", "customId", "dueDate", "startDate", "managerId", "companyId",
+    "createdAt", "updatedAt", "taskId", "projectSlug", "ownerId", "assigneeId",
+    "estimatedTime", "taskName", "scopeSlug", "invoiceId", "unitPrice", "purchaserId",
+    "purchaseDate", "financialYearId", "rateCardGroupId", "positionId", "hourlyRate",
+    "dailyRate", "authorUserId", "startsAt", "endsAt", "isPinned", "publishedAt",
+    "contentText", "departmentId", "userId", "skillId", "requestorId", "leaveStartDate",
+    "leaveEndDate", "leavePolicyId", "requestedDuration", "durationUnit",
+    "entitlementUnit", "recurringPeriod", "isPaid", "allowFullDay", "allowHalfDay",
+    "staffUserId", "openingBalance", "createdById", "completionDate", "feedbackId",
+    "submitterId", "firstAnswer", "secondAnswer", "goalId", "fullName", "jobTitle",
+    "employmentStatus", "hireDate", "amountPaid", "paidAt", "paymentStatus", "issueDate",
+}
+_MIXED_CASE_COLUMNS_LOWER = {c.lower(): c for c in _MIXED_CASE_COLUMNS}
+
 MAX_ROW_LIMIT = 500
 
 
@@ -68,6 +90,15 @@ def validate_select(sql: str) -> str:
         func_name = (getattr(func, "this", None) or "")
         if isinstance(func_name, str) and func_name.lower() in disallowed_functions:
             raise UnsafeQueryError(f"function not allowed: {func_name}")
+
+    # Force correct quoting/casing on every identifier that matches a known
+    # mixed-case column, regardless of how the LLM wrote it (unquoted,
+    # wrong-case, or correctly quoted already) - see _MIXED_CASE_COLUMNS.
+    for identifier in stmt.find_all(exp.Identifier):
+        correct_name = _MIXED_CASE_COLUMNS_LOWER.get(identifier.this.lower())
+        if correct_name is not None:
+            identifier.set("this", correct_name)
+            identifier.set("quoted", True)
 
     existing_limit = stmt.args.get("limit")
     if existing_limit is not None:
