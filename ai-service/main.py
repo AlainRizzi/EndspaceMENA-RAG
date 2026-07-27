@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from arq import create_pool
@@ -6,9 +7,13 @@ from arq.jobs import Job
 from fastapi import FastAPI, HTTPException
 
 from capabilities.registry import CAPABILITIES
+from chat.checkpointer import close_checkpointer, init_checkpointer
+from chat.router import router as chat_router
 from config import settings
 from db import close_pool
 from logging_service import log_invocation
+
+logging.basicConfig(level=logging.INFO)
 
 _redis_pool = None
 
@@ -22,11 +27,14 @@ async def get_redis():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await init_checkpointer()
     yield
+    await close_checkpointer()
     await close_pool()
 
 
 app = FastAPI(title="GraySync AI Service", lifespan=lifespan)
+app.include_router(chat_router)
 
 
 @app.post("/ai/{capability_name}")

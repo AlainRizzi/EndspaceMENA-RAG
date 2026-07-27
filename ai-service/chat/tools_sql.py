@@ -67,10 +67,11 @@ Notes:
   averages, etc.) should be computed in SQL by joining/aggregating the
   relevant views. Work out which views apply to each specific question rather
   than assuming a fixed formula.
-- v_staff_leave_balance and v_leave_request may simply have no rows for a
-  given staff member/policy (not every staff member has been given an
-  opening balance or has made a request) - treat that as "zero", not as
-  missing data, and join/aggregate accordingly.
+- v_leave_policy always has a row per policy; v_staff_leave_balance and
+  v_leave_request may have no rows at all for a given staff member (not
+  everyone has an opening balance or has made a request) - that means "zero",
+  not "no data", so anchor queries involving these on whichever view is
+  guaranteed to have the rows you need, and join outward from there.
 """
 
 
@@ -78,7 +79,7 @@ class TextToSqlError(Exception):
     pass
 
 
-async def generate_sql(question: str, user_id: int | None) -> str:
+async def generate_sql(question: str, user_id: int | None, retry_error: str | None = None) -> str:
     """LLM drafts a SELECT against the curated views. The draft is untrusted
     output - it's validated by sql_guard.validate_select before ever being
     considered for execution (see run_text_to_sql).
@@ -89,6 +90,11 @@ async def generate_sql(question: str, user_id: int | None) -> str:
         f"The caller's own userId is {user_id}."
         if user_id is not None
         else "The caller's userId is unknown."
+    )
+
+    retry_line = (
+        f"\nYour previous attempt failed with this database error - fix it:\n{retry_error}\n"
+        if retry_error else ""
     )
 
     prompt = f"""You write a single read-only PostgreSQL SELECT query to answer a
@@ -119,24 +125,15 @@ the reference. Lowercase columns like id, name, status need no quoting.
 {_SCHEMA_DESCRIPTION}
 
 Question: {question}
-
+{retry_line}
 Return only the SQL query."""
 
     result, _usage = await llm_client.call_structured(prompt, GeneratedSql)
     return result.sql
 
 
-async def run_text_to_sql(question: str, org_slug: str, user_id: int | None) -> list[dict]:
-    """Full pipeline: LLM drafts SQL -> query inspector validates/caps it ->
-    executes as ai_readonly with the session GUCs the views' RLS/ownership
-    predicates read (see schema.sql: ai.session_user_id(), visible_project_slugs()).
-    """
-    raw_sql = await generate_sql(question, user_id)
-
-    try:
-        safe_sql = validate_select(raw_sql)
-    except UnsafeQueryError as e:
-        raise TextToSqlError(f"generated query rejected: {e}") from e
+async def _validate_and_run(sql: str, org_slug: str, user_id: int | None) -> list[dict]:
+    safe_sql = validate_select(sql)  # UnsafeQueryError propagates uncaught - not retryable
 
     pool = await get_ai_readonly_pool()
     async with pool.acquire() as conn:
@@ -152,3 +149,28 @@ async def run_text_to_sql(question: str, org_slug: str, user_id: int | None) -> 
             rows = await conn.fetch(safe_sql)
 
     return [dict(r) for r in rows]
+
+
+async def run_text_to_sql(question: str, org_slug: str, user_id: int | None) -> list[dict]:
+    """Full pipeline: LLM drafts SQL -> query inspector validates/caps it ->
+    executes as ai_readonly with the session GUCs the views' RLS/ownership
+    predicates read (see schema.sql: ai.session_user_id(), visible_project_slugs()).
+
+    One retry on a database error (e.g. a wrong column/alias) with the error
+    fed back to the LLM - occasional SQL mistakes are expected from generated
+    SQL and are usually fixable given the exact error, so this is cheaper and
+    more reliable than prompt engineering for every possible mistake.
+    """
+    raw_sql = await generate_sql(question, user_id)
+    try:
+        return await _validate_and_run(raw_sql, org_slug, user_id)
+    except UnsafeQueryError as e:
+        raise TextToSqlError(f"generated query rejected: {e}") from e
+    except Exception as e:
+        retry_sql = await generate_sql(question, user_id, retry_error=str(e))
+        try:
+            return await _validate_and_run(retry_sql, org_slug, user_id)
+        except UnsafeQueryError as retry_e:
+            raise TextToSqlError(f"generated query rejected: {retry_e}") from retry_e
+        except Exception as retry_e:
+            raise TextToSqlError(f"query failed after retry: {retry_e}") from retry_e

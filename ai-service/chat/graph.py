@@ -1,19 +1,12 @@
-import asyncio
 import json
-import sys
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from chat.persistence import log_tool_call
 from chat.schemas import Plan
 from chat.tools import execute_tool, tool_catalog_text
 from llm_client import llm_client
-
-if sys.platform == "win32":
-    # psycopg's async mode (used by the Postgres checkpointer) requires a
-    # SelectorEventLoop - the default ProactorEventLoop on Windows raises
-    # InterfaceError as soon as an async connection is opened.
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 class StepResult(TypedDict):
@@ -27,11 +20,21 @@ class StepResult(TypedDict):
 class AgentState(TypedDict):
     org_slug: str
     user_id: int | None
+    conversation_id: int | None
     message: str
+    history: list[dict]  # prior turns in this conversation: [{role, content}, ...], oldest first
     plan_steps: list[dict]  # [{tool, args, rationale}, ...]
     current_step: int
     step_results: list[StepResult]
     answer: str
+
+
+def _render_history(history: list[dict]) -> str:
+    if not history:
+        return ""
+    lines = "\n".join(f"{h['role']}: {h['content']}" for h in history)
+    return f"\nPrior conversation (for context - the current question may refer back to it, " \
+           f"e.g. 'it'/'that project'):\n{lines}\n"
 
 
 async def plan_node(state: AgentState) -> dict:
@@ -40,13 +43,16 @@ projects, tasks, invoices, leave, staff, and documents.
 
 Available tools:
 {tool_catalog_text()}
-
+{_render_history(state['history'])}
 Question: {state['message']}
 
 Produce a short, ordered plan: which tool(s) to call, in what order, and why.
-Only include steps that are actually needed - most questions need 1-2 steps.
-If the question can be answered without any tool (e.g. small talk, or asking
-what you can help with), return an empty steps list.
+Resolve any reference to something mentioned earlier in the conversation
+(e.g. "it", "that project") using the prior conversation above before
+deciding which tool(s) to call. Only include steps that are actually needed -
+most questions need 1-2 steps. If the question can be answered without any
+tool (e.g. small talk, or asking what you can help with), return an empty
+steps list.
 Each step's args_json must be a JSON-encoded object matching that tool's args."""
 
     result, _usage = await llm_client.call_structured(prompt, Plan)
@@ -64,20 +70,31 @@ Each step's args_json must be a JSON-encoded object matching that tool's args.""
 
 async def execute_step_node(state: AgentState) -> dict:
     step = state["plan_steps"][state["current_step"]]
+    error: str | None = None
+    result = None
     try:
         result = await execute_tool(step["tool"], step["args"], state["org_slug"], state["user_id"])
-        step_result: StepResult = {
-            "tool": step["tool"], "args": step["args"], "rationale": step["rationale"],
-            "result": result, "error": None,
-        }
     except Exception as e:
         # A failed step (bad args, tool error, rejected SQL, ...) doesn't
         # abort the plan - synthesis sees the error and can still answer from
         # whatever other steps succeeded, or tell the user what went wrong.
-        step_result = {
-            "tool": step["tool"], "args": step["args"], "rationale": step["rationale"],
-            "result": None, "error": str(e),
-        }
+        error = str(e)
+
+    step_result: StepResult = {
+        "tool": step["tool"], "args": step["args"], "rationale": step["rationale"],
+        "result": result, "error": error,
+    }
+
+    # Audit trail per the implementation guide (Part A Step 12 / Part B.7):
+    # every tool call, regardless of outcome. Logging failure itself must
+    # never break the chat turn - swallow and move on.
+    try:
+        await log_tool_call(
+            state["org_slug"], state["user_id"], state["conversation_id"],
+            step["tool"], step["args"], result, error,
+        )
+    except Exception:
+        pass
 
     return {
         "step_results": [*state["step_results"], step_result],
@@ -92,10 +109,12 @@ def route_after_step(state: AgentState) -> str:
 
 
 async def synthesize_node(state: AgentState) -> dict:
+    history_text = _render_history(state["history"])
+
     if not state["plan_steps"]:
         prompt = f"""Answer the user's message directly and briefly - no tool
 data was needed for this.
-
+{history_text}
 Message: {state['message']}"""
     else:
         steps_text = "\n\n".join(
@@ -109,7 +128,7 @@ If a step errored, don't expose raw error details - acknowledge you couldn't
 get that piece and answer from what succeeded, or say you don't have enough
 information if nothing useful came back. Never state a number or fact that
 isn't actually present in the data below.
-
+{history_text}
 Question: {state['message']}
 
 {steps_text}
