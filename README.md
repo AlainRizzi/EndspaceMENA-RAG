@@ -3,22 +3,31 @@
 FastAPI service exposing AI capabilities (`suggest_skills`, `summarize_project`) backed by
 Gemini, AWS Bedrock (embeddings + rerank), and a RAG pipeline over `graysync` Postgres data.
 
+All commands below are run from the `ai-service/` directory unless noted otherwise:
+
+```powershell
+cd ai-service
+```
+
 ## Prerequisites
 
 - Postgres 18 with the `pgvector` extension installed, `schema.sql` applied to `graysync`.
 - Redis reachable at `REDIS_URL` (e.g. `docker run -d --name redis -p 6379:6379 redis:7-alpine`).
-- `.env` filled in (see `.env.example`) — `DATABASE_URL`, `GEMINI_API_KEY`, AWS keys with
-  `bedrock:InvokeModel` (and ideally `bedrock:Rerank`) plus `s3:GetObject` on the target bucket.
+- `.env` filled in (copy `ai-service/.env.example` to `ai-service/.env`) — `DATABASE_URL`,
+  `GEMINI_API_KEY`, AWS keys with `bedrock:InvokeModel` (and ideally `bedrock:Rerank`) plus
+  `s3:GetObject` on the target bucket.
 
 ## Setup
 
 ```powershell
+python -m venv venv
+venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 ## Running
 
-Two processes must run at the same time, **in separate terminals**:
+Two processes must run at the same time, **in separate terminals** (both from `ai-service/`):
 
 **Terminal 1 — API server:**
 ```powershell
