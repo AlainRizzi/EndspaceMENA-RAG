@@ -74,8 +74,11 @@ TOOLS: dict[str, ToolSpec] = {
         name="list_my_leave_requests",
         description=(
             "List leave requests visible to the caller (their own if a regular staff "
-            "member, everyone's in the organisation if a manager/admin). Use for 'how "
-            "many leave days do I have left' or 'who's on leave' style questions. No args."
+            "member, everyone's in the organisation if a manager/admin) - dates, status, "
+            "duration per request. Use for 'who's on leave' or 'list my leave requests' "
+            "style questions. Does NOT include entitlement or remaining balance - for "
+            "'how many leave days do I have left', use query_data instead (it can join "
+            "policy entitlement + opening balance + approved requests). No args."
         ),
         run=_run_list_my_leave_requests,
     ),

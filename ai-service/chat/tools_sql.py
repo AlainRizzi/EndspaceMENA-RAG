@@ -65,11 +65,12 @@ Notes:
   compute one; if asked, say that data isn't available through this tool.
 - Values that aren't stored directly (totals, remainders, balances, counts,
   averages, etc.) should be computed in SQL by joining/aggregating the
-  relevant views - e.g. a leave balance combines v_leave_policy.entitlement,
-  v_staff_leave_balance.openingBalance, and a SUM over matching
-  v_leave_request rows; an invoice's outstanding amount combines v_invoice
-  and v_invoice_item. Work out which views apply to each specific question
-  rather than assuming a fixed formula.
+  relevant views. Work out which views apply to each specific question rather
+  than assuming a fixed formula.
+- v_staff_leave_balance and v_leave_request may simply have no rows for a
+  given staff member/policy (not every staff member has been given an
+  opening balance or has made a request) - treat that as "zero", not as
+  missing data, and join/aggregate accordingly.
 """
 
 
@@ -77,17 +78,38 @@ class TextToSqlError(Exception):
     pass
 
 
-async def generate_sql(question: str) -> str:
+async def generate_sql(question: str, user_id: int | None) -> str:
     """LLM drafts a SELECT against the curated views. The draft is untrusted
     output - it's validated by sql_guard.validate_select before ever being
     considered for execution (see run_text_to_sql).
     """
     from chat.schemas import GeneratedSql
 
+    caller_line = (
+        f"The caller's own userId is {user_id}."
+        if user_id is not None
+        else "The caller's userId is unknown."
+    )
+
     prompt = f"""You write a single read-only PostgreSQL SELECT query to answer a
 question, using ONLY the views listed below. Never invent columns or tables.
-Never add WHERE clauses for organisationSlug/userId - visibility is already
+
+Never add WHERE clauses for organisationSlug - tenant isolation is already
 enforced by the views themselves.
+
+{caller_line} Two different things both use "userId" but must not be
+confused: (a) VISIBILITY - which rows the caller is even allowed to see is
+already enforced automatically by the views (a regular staff member only
+ever sees their own leave/feedback/notes rows; a manager/admin sees
+everyone's) - never add a userId filter just to enforce this. (b) SCOPE - if
+the question is specifically about "me"/"my"/"I" (e.g. "how many leave days
+do I have left", "my leave requests"), you MUST add an explicit
+WHERE ... = {user_id} filter on the relevant user-identifying column
+(requestorId, userId, staffUserId, ownerId, assigneeId, etc. depending on the
+view) - otherwise a manager/admin's broader visibility means the query
+aggregates or lists everyone's data instead of just theirs, which answers a
+different question than what was asked. If the question is about people in
+general (no "me"/"my"), do not add this filter.
 
 Every mixed-case column name below (e.g. projectSlug, organisationSlug,
 createdAt) MUST be double-quoted exactly as shown (e.g. "projectSlug") in the
@@ -109,7 +131,7 @@ async def run_text_to_sql(question: str, org_slug: str, user_id: int | None) -> 
     executes as ai_readonly with the session GUCs the views' RLS/ownership
     predicates read (see schema.sql: ai.session_user_id(), visible_project_slugs()).
     """
-    raw_sql = await generate_sql(question)
+    raw_sql = await generate_sql(question, user_id)
 
     try:
         safe_sql = validate_select(raw_sql)
