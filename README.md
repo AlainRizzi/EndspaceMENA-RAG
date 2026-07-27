@@ -11,7 +11,11 @@ cd ai-service
 
 ## Prerequisites
 
-- Postgres 18 with the `pgvector` extension installed, `schema.sql` applied to `graysync`.
+- Postgres 18 with the `pgvector` extension installed, `schema.sql` applied to `graysync`
+  (creates the `ai` schema — all AI-owned tables live there, separate from GraySync's own
+  tables in `public`). If you have an existing DB from before this change, `schema.sql` has
+  a commented-out one-time `DROP TABLE` block at the top to clear the old `public`-schema
+  copies first — rerun `python ingest.py` afterwards to repopulate under `ai`.
 - Redis reachable at `REDIS_URL` (e.g. `docker run -d --name redis -p 6379:6379 redis:7-alpine`).
 - `.env` filled in (copy `ai-service/.env.example` to `ai-service/.env`) — `DATABASE_URL`,
   `GEMINI_API_KEY`, AWS keys with `bedrock:InvokeModel` (and ideally `bedrock:Rerank`) plus
