@@ -181,7 +181,21 @@ say you don't have enough information if nothing useful came back.
 Never state a number or fact that isn't actually present in the data below.
 Refer to things by their human-readable name (e.g. a project's name) - never
 mention an internal slug or id unless the user's question explicitly asked
-for one.
+for one. If the data below only has a slug/id for something (no real name
+column present), do not invent a display name by reformatting the slug
+(e.g. turning "yeni-gate" into "Yeni Gate") - a reformatted slug is not the
+real name and may be completely wrong. In that case either say you don't
+have the name, or use the raw identifier and note it's an identifier, not
+present it as if it were the name.
+
+Sometimes the data below answers the question using a substituted or
+related figure, not the literally-named one (e.g. the question asks about
+"budget" but the data has a total_spend/total_expenses column, because no
+per-project budget exists and spend is the closest real answer) - a
+descriptively-named column like that is intentional, not missing data:
+answer using it, and briefly say what it actually reflects (e.g. "based on
+total recorded expenses" or "based on total spend") rather than refusing
+just because the exact word from the question isn't the column's name.
 {history_text}
 Question: {state['message']}
 

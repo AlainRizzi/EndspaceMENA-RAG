@@ -256,14 +256,21 @@ $$ LANGUAGE sql STABLE;
 -- (ai.session_client_restrict_to) rather than folded into the entity gate,
 -- since it's a genuinely different mechanism (which Contact, not which org).
 
--- Which of the given candidate entities the caller's role actually holds a
--- READ ability for - used by the text-to-SQL tool (chat/permissions.py) to
--- proactively distinguish "this view returned zero rows because the role
+-- Which of the given candidate entity FAMILIES (exact name, or a name that
+-- is the prefix of an underscore-separated sub-entity - same matching rule
+-- as session_has_read_ability_family) the caller's role actually holds a
+-- READ ability under - used by the text-to-SQL tool (chat/permissions.py)
+-- to proactively distinguish "this view returned zero rows because the role
 -- has no ability for it" (a real access denial) from "zero rows because the
 -- data happens to be empty" (not a denial), BEFORE running the generated
 -- query - the row-level result alone can't tell those two apart after the
 -- fact, since a genuinely-empty allowed view and a permission-filtered view
--- both just return no rows.
+-- both just return no rows. Matching by family here (not exact name) is
+-- what keeps this pre-check in sync with the views' own family-matching
+-- gates (v_expense, v_invoice, ...) without a hardcoded exact-name list on
+-- either side - only the small set of family prefixes a view cares about
+-- (chat/permissions.py VIEW_ENTITIES) is still a code-side decision; the
+-- set of abilities that satisfy a given family is looked up live here.
 -- NOTE: none of these resolve or filter by organisationSlug. A person's
 -- permissions come from their Role (User.id -> User.role_id -> Ability),
 -- full stop - organisationSlug is tenant/ownership data on the rows
@@ -273,13 +280,17 @@ $$ LANGUAGE sql STABLE;
 -- across many organisations (e.g. UserOrganisationAccess), and treating
 -- organisationSlug as a hard WHERE filter on every view silently hid all
 -- but one of them - the Ability model is meant to be the ONLY constraint.
-CREATE OR REPLACE FUNCTION ai.session_held_read_entities(candidate_entities text[]) RETURNS TABLE(entity text) AS $$
-    SELECT DISTINCT a.entity::text
-    FROM public."User" u
-    JOIN public."Ability" a ON a."roleId" = u.role_id
-    WHERE u.id = ai.session_user_id()
-      AND a.entity::text = ANY(candidate_entities)
-      AND 'READ' = ANY(a.action::text[]);
+CREATE OR REPLACE FUNCTION ai.session_held_read_entity_families(candidate_prefixes text[]) RETURNS TABLE(family text) AS $$
+    SELECT DISTINCT p
+    FROM unnest(candidate_prefixes) AS p
+    WHERE EXISTS (
+        SELECT 1
+        FROM public."User" u
+        JOIN public."Ability" a ON a."roleId" = u.role_id
+        WHERE u.id = ai.session_user_id()
+          AND (a.entity::text = p OR a.entity::text LIKE p || '\_%' ESCAPE '\')
+          AND 'READ' = ANY(a.action::text[])
+    );
 $$ LANGUAGE sql STABLE;
 
 -- Does the caller's role have a READ ability for the given entity? NULL/no
@@ -293,6 +304,35 @@ CREATE OR REPLACE FUNCTION ai.session_has_read_ability(target_entity text) RETUR
             JOIN public."Ability" a ON a."roleId" = u.role_id
             WHERE u.id = ai.session_user_id()
               AND a.entity::text = target_entity
+              AND 'READ' = ANY(a.action::text[])
+            LIMIT 1
+        ),
+        false
+    );
+$$ LANGUAGE sql STABLE;
+
+-- Same as session_has_read_ability, but matches ANY entity in a given family
+-- (entity = prefix, or entity starting with prefix || '_') rather than one
+-- exact name. Needed because the same organisation's Ability rows are not
+-- all on one schema version: confirmed live in this DB that two roles
+-- (id=1, id=37, both named "Owner") only hold the coarse legacy entity for a
+-- family (e.g. plain EXPENSE, INVOICE) while every other role also or
+-- instead holds the newer granular sub-abilities (EXPENSE_READ_ALL_LIST,
+-- EXPENSE_APPROVE, INVOICE_VIEW_ALL, ...) - checking one exact name
+-- silently denies whichever generation of role doesn't use it. Any
+-- sub-ability in the family that carries READ counts (confirmed: every
+-- real sub-ability's action array that includes any of
+-- CREATE/UPDATE/DELETE/APPROVE also includes READ - there's no "can modify
+-- but can't see" ability in this catalog), so this doesn't require a
+-- separate list of "the read ones" within a family.
+CREATE OR REPLACE FUNCTION ai.session_has_read_ability_family(entity_prefix text) RETURNS boolean AS $$
+    SELECT COALESCE(
+        (
+            SELECT true
+            FROM public."User" u
+            JOIN public."Ability" a ON a."roleId" = u.role_id
+            WHERE u.id = ai.session_user_id()
+              AND (a.entity::text = entity_prefix OR a.entity::text LIKE entity_prefix || '\_%' ESCAPE '\')
               AND 'READ' = ANY(a.action::text[])
             LIMIT 1
         ),
@@ -390,6 +430,29 @@ CREATE OR REPLACE FUNCTION ai.session_can_see_user(target_user_id integer) RETUR
         OR ai.session_has_read_ability('PEOPLE_INTERNAL');
 $$ LANGUAGE sql STABLE;
 
+-- Organisations the caller has a real relationship to: their own home org
+-- (User.organisationSlug) plus every org UserOrganisationAccess explicitly
+-- grants them (confirmed live: e.g. userId=6 has UserOrganisationAccess rows
+-- for 8 different organisations, matching their real cross-org project
+-- involvement). Needed for views like v_leave_policy/v_budget that are
+-- "org-wide" but span MULTIPLE organisations in the table as a whole (unlike
+-- v_announcement/v_department, where every row already belongs to one
+-- self-evident org) - without this, "org-wide" degenerates to "every org in
+-- the database," which is what let a High Management Level user at
+-- endspace-mena see all 34 leave policies for every tenant, not just their
+-- own. This is a data-relationship filter, not an Ability check - it runs
+-- alongside the entity gate, not instead of it.
+CREATE OR REPLACE FUNCTION ai.session_visible_orgs() RETURNS SETOF text AS $$
+    SELECT u."organisationSlug"
+    FROM public."User" u
+    WHERE u.id = ai.session_user_id()
+    UNION
+    SELECT o.slug
+    FROM public."UserOrganisationAccess" uoa
+    JOIN public."Organisation" o ON o.id = uoa."organisationId"
+    WHERE uoa."userId" = ai.session_user_id();
+$$ LANGUAGE sql STABLE;
+
 -- ---- Project/task-scoped entities (visible per ai.visible_project_slugs) ----
 
 -- Deny-by-default entity gate: a role with none of these three project-read
@@ -476,11 +539,15 @@ CREATE OR REPLACE VIEW ai.v_invoice AS
 -- separate invoice-read abilities (defaults.json "Finances" tab) - a role
 -- can have either, both, or neither. ALL means every invoice in the org
 -- regardless of project involvement; PROJECT_LINKED still narrows to
--- visible_project_slugs() same as everything else project-scoped.
+-- visible_project_slugs() same as everything else project-scoped. Plain
+-- INVOICE (legacy, pre-split entity - confirmed still live on role ids 1
+-- and 37, "Owner") behaves like VIEW_ALL: the old schema had no
+-- project-linked-only concept, so its holders always saw every invoice.
 SELECT i.id, i."customId", i."organisationSlug", i."companyId", i."projectSlug", i."scopeSlug",
        i.type, i."issueDate", i."dueDate", i."amountPaid", i."paidAt", i."paymentStatus", i.balance
 FROM public."Invoice" i
 WHERE ai.session_has_read_ability('INVOICE_VIEW_ALL')
+   OR ai.session_has_read_ability('INVOICE')
    OR (
        ai.session_has_read_ability('INVOICE_VIEW_PROJECT_LINKED')
        AND i."projectSlug" IS NOT NULL
@@ -492,6 +559,7 @@ SELECT ii.id, ii."invoiceId", ii.description, ii.quantity, ii."unitPrice", ii.di
 FROM public."InvoiceItem" ii
 JOIN public."Invoice" i ON i.id = ii."invoiceId"
 WHERE ai.session_has_read_ability('INVOICE_VIEW_ALL')
+   OR ai.session_has_read_ability('INVOICE')
    OR (
        ai.session_has_read_ability('INVOICE_VIEW_PROJECT_LINKED')
        AND i."projectSlug" IS NOT NULL
@@ -500,11 +568,17 @@ WHERE ai.session_has_read_ability('INVOICE_VIEW_ALL')
 
 CREATE OR REPLACE VIEW ai.v_expense AS
 -- Same two-ability shape as invoices: EXPENSE_READ_ALL_LIST (org-wide) vs
--- EXPENSE_VIEW_PROJECT_LINKED (project-scoped).
+-- EXPENSE_VIEW_PROJECT_LINKED (project-scoped). Also accepts any other
+-- EXPENSE_* sub-ability with READ (session_has_read_ability_family) - e.g.
+-- EXPENSE_APPROVE, EXPENSE_MODIFY_OTHERS - since a role that can act on
+-- expenses can necessarily see them, and plain legacy EXPENSE (role ids 1,
+-- 37 - "Owner") behaves like org-wide READ_ALL_LIST for the same reason as
+-- v_invoice's legacy INVOICE fallback above.
 SELECT e.id, e."customId", e."organisationSlug", e."projectSlug", e."purchaserId",
        e."purchaseDate", e."dueDate", e.cost, e.billed, e.profit, e.action
 FROM public."Expense" e
 WHERE ai.session_has_read_ability('EXPENSE_READ_ALL_LIST')
+   OR ai.session_has_read_ability_family('EXPENSE')
    OR (
        ai.session_has_read_ability('EXPENSE_VIEW_PROJECT_LINKED')
        AND e."projectSlug" IS NOT NULL
@@ -532,9 +606,30 @@ WHERE (
   );
 
 CREATE OR REPLACE VIEW ai.v_budget AS
+-- Budget spans every organisation in the database in one table (confirmed:
+-- 41 rows across 20 orgs) with no natural per-row scoping otherwise - same
+-- leak shape as v_leave_policy had, fixed the same way.
 SELECT b.id, b.name, b."organisationSlug", b."financialYearId", b."createdAt"
 FROM public."Budget" b
-WHERE ai.session_has_read_ability('PROJECT_BUDGET');
+WHERE ai.session_has_read_ability('PROJECT_BUDGET')
+  AND b."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
+
+CREATE OR REPLACE VIEW ai.v_budget_data AS
+-- Budget -> AccountBudget (one row per chart-of-accounts line per budget) ->
+-- BudgetData (one row per month/year with a dollar value) - this is an
+-- org-wide financial budget broken down by account category and month, NOT
+-- a per-project budget. There is no projectId/projectSlug anywhere in this
+-- chain (confirmed against the real schema) - "which project has the
+-- highest budget" cannot be answered from this data; project-level
+-- financials live in v_invoice/v_expense/v_scope instead (see schema note
+-- in tools_sql.py).
+SELECT bd.id, bd."accountBudgetId", ab."budgetId", b.name AS "budgetName",
+       ab."organisationSlug", bd.month, bd.year, bd.value
+FROM public."BudgetData" bd
+JOIN public."AccountBudget" ab ON ab.id = bd."accountBudgetId"
+JOIN public."Budget" b ON b.id = ab."budgetId"
+WHERE ai.session_has_read_ability('PROJECT_BUDGET')
+  AND ab."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
 
 CREATE OR REPLACE VIEW ai.v_rate_card AS
 -- RateCard has no dedicated Entity in the real catalog either - gated on
@@ -546,17 +641,25 @@ WHERE ai.session_has_read_ability('PROJECT_BUDGET');
 
 -- ---- Org-wide entities (no per-project ownership dimension) ----
 
+-- The views below (announcement/contact/department/skill) each span every
+-- organisation in the database in one table with no natural per-row
+-- scoping otherwise - same leak shape as v_leave_policy had (confirmed:
+-- Announcement 2 distinct orgs, Department 20, Skill 2), fixed the same way
+-- via ai.session_visible_orgs().
+
 CREATE OR REPLACE VIEW ai.v_announcement AS
 SELECT a.id, a."organisationSlug", a."authorUserId", a.type, a.status, a.title,
        a."contentText", a."startsAt", a."endsAt", a."isPinned", a."publishedAt", a."createdAt"
 FROM public."Announcement" a
-WHERE ai.session_has_read_ability('ANNOUNCEMENT');
+WHERE ai.session_has_read_ability('ANNOUNCEMENT')
+  AND a."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
 
 CREATE OR REPLACE VIEW ai.v_announcement_comment AS
 SELECT ac.id, ac."announcementId", ac."authorUserId", ac."contentText", ac.status, ac."createdAt"
 FROM public."AnnouncementComment" ac
 JOIN public."Announcement" a ON a.id = ac."announcementId"
-WHERE ai.session_has_read_ability('ANNOUNCEMENT');
+WHERE ai.session_has_read_ability('ANNOUNCEMENT')
+  AND a."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
 
 CREATE OR REPLACE VIEW ai.v_contact AS
 -- COMPANY is the real catalog entity for the "Contacts" tab (bundles
@@ -564,7 +667,8 @@ CREATE OR REPLACE VIEW ai.v_contact AS
 SELECT c.id, c.slug, c.name, c.type, c.city, c.state, c.country, c.website, c.email, c."createdAt"
 FROM public."Contact" c
 JOIN public."ContactOnOrganisation" coo ON coo."contactId" = c.id
-WHERE ai.session_has_read_ability('COMPANY');
+WHERE ai.session_has_read_ability('COMPANY')
+  AND coo."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
 -- notes/address intentionally excluded - CONTACT_NOTES already covered via
 -- RAG ingestion (schema.sql RagSourceType), not needed raw here too.
 
@@ -573,23 +677,27 @@ SELECT cc.id, cc."customId", cc.email, cc."companyType", cc.status, c.name
 FROM public."CompanyContact" cc
 JOIN public."Contact" c ON c.id = cc.id
 JOIN public."ContactOnOrganisation" coo ON coo."contactId" = c.id
-WHERE ai.session_has_read_ability('COMPANY');
+WHERE ai.session_has_read_ability('COMPANY')
+  AND coo."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
 
 CREATE OR REPLACE VIEW ai.v_department AS
 SELECT d.id, d.name, d."organisationSlug"
 FROM public."Department" d
-WHERE ai.session_has_read_ability('ORG_DEPARTMENTS');
+WHERE ai.session_has_read_ability('ORG_DEPARTMENTS')
+  AND d."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
 
 CREATE OR REPLACE VIEW ai.v_position AS
 SELECT pos.id, pos.name, pos."departmentId", dep."organisationSlug"
 FROM public."Position" pos
 JOIN public."Department" dep ON dep.id = pos."departmentId"
-WHERE ai.session_has_read_ability('ORG_DEPARTMENTS');
+WHERE ai.session_has_read_ability('ORG_DEPARTMENTS')
+  AND dep."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
 
 CREATE OR REPLACE VIEW ai.v_skill AS
 SELECT s.id, s.name, s."organisationSlug"
 FROM public."Skill" s
-WHERE ai.session_has_read_ability('ORG_SKILLS');
+WHERE ai.session_has_read_ability('ORG_SKILLS')
+  AND s."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
 
 -- ---- Record-owned entities ("own" = about me, or a manager/admin viewing anyone) ----
 
@@ -651,15 +759,35 @@ WHERE ai.session_has_read_ability('LEAVES')
   AND (lr."requestorId" = ai.session_user_id() OR ai.session_can_see_others_leave());
 
 CREATE OR REPLACE VIEW ai.v_leave_policy AS
--- Policy terms (entitlement, accrual rules) aren't per-user data - org-wide,
--- no ownership dimension, needed to compute "how many days do I have left".
--- Still gated on LEAVES:READ - no point exposing policy terms to a role that
--- can't see any leave data at all.
+-- Policy terms (entitlement, accrual rules) aren't per-user data - no
+-- per-user ownership dimension within an org, needed to compute "how many
+-- days do I have left". Still gated on LEAVES:READ - no point exposing
+-- policy terms to a role that can't see any leave data at all. UNLIKE other
+-- org-wide views (v_announcement, v_department, ...), LeavePolicy spans
+-- every organisation in the whole database in one table with no natural
+-- per-row scoping otherwise - confirmed this was returning all ~34 policies
+-- system-wide to any caller with LEAVES:READ before this org filter was
+-- added, corrupting "how many days do I have left" with other tenants'
+-- differently-named, differently-valued policies.
+-- applicableAfter/applicableAfterUnit added (confirmed live: Amir Moadad,
+-- hired 2025-11-01, genuinely has 0 Annual Leave available today per
+-- GraySync's own UI - not a bug - because that policy's applicableAfter is
+-- 12 MONTHS and he isn't there yet). allowCarryForward/accrualRate/
+-- maxAccrual/maxCarryForward also added but NOT yet factored into the
+-- documented remaining-leave formula (see tools_sql.py schema notes) -
+-- confirmed live a second policy (Rony Chiha's Sick Leave) shows a real
+-- entitlement in GraySync's UI (30) that plain LeavePolicy.entitlement (10)
+-- does not explain; this is very likely accrual/carry-forward math this
+-- schema does not yet reproduce, left as a known, documented gap rather
+-- than a guessed-at formula.
 SELECT lp.id, lp.name, lp.entitlement, lp."entitlementUnit", lp."recurringPeriod",
-       lp."isPaid", lp."allowFullDay", lp."allowHalfDay", lg."organisationSlug"
+       lp."isPaid", lp."allowFullDay", lp."allowHalfDay", lg."organisationSlug",
+       lp."applicableAfter", lp."applicableAfterUnit", lp."allowCarryForward",
+       lp."accrualRate", lp."maxAccrual", lp."maxCarryForward"
 FROM public."LeavePolicy" lp
 JOIN public."LeaveGroup" lg ON lg.id = lp."groupId"
-WHERE ai.session_has_read_ability('LEAVES');
+WHERE ai.session_has_read_ability('LEAVES')
+  AND lg."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
 
 CREATE OR REPLACE VIEW ai.v_staff_leave_balance AS
 SELECT slob.id, slob."staffUserId", slob."leavePolicyId", slob."openingBalance", u."organisationSlug"
@@ -735,7 +863,7 @@ ALTER ROLE ai_readonly SET statement_timeout = '5s';
 GRANT USAGE ON SCHEMA ai TO ai_readonly;
 GRANT SELECT ON
     ai.v_project, ai.v_project_member, ai.v_task, ai.v_task_assignee, ai.v_task_activity, ai.v_scope,
-    ai.v_invoice, ai.v_invoice_item, ai.v_expense, ai.v_quote, ai.v_budget, ai.v_rate_card,
+    ai.v_invoice, ai.v_invoice_item, ai.v_expense, ai.v_quote, ai.v_budget, ai.v_budget_data, ai.v_rate_card,
     ai.v_announcement, ai.v_announcement_comment, ai.v_contact, ai.v_company_contact,
     ai.v_department, ai.v_position, ai.v_skill,
     ai.v_staff_directory, ai.v_staff, ai.v_user_skill, ai.v_leave_request, ai.v_leave_policy, ai.v_staff_leave_balance,
@@ -748,4 +876,6 @@ GRANT SELECT ON
 -- make an object reachable if the containing schema is closed off.
 GRANT USAGE ON SCHEMA public TO ai_readonly;
 GRANT SELECT ON public."Project", public."Task", public."TaskAssignee", public."_members",
-    public."User", public."Staff", public."LeaveGroup", public."Ability" TO ai_readonly;
+    public."User", public."Staff", public."LeaveGroup", public."Ability",
+    public."UserOrganisationAccess", public."Organisation", public."BudgetData", public."AccountBudget"
+    TO ai_readonly;

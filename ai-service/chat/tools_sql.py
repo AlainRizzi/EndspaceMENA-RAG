@@ -36,7 +36,6 @@ v_invoice(id, customId, organisationSlug, companyId, projectSlug, scopeSlug, typ
 v_invoice_item(id, invoiceId, description, quantity, unitPrice, discount, amount)
 v_expense(id, customId, organisationSlug, projectSlug, purchaserId, purchaseDate, dueDate, cost, billed, profit, action)
 v_quote(id, quote_number, job_title, organisationSlug, project_id, issued_on, subtotal, gst, total, status)
-v_budget(id, name, organisationSlug, financialYearId, createdAt)
 v_rate_card(id, rateCardGroupId, positionId, hourlyRate, dailyRate)
 v_announcement(id, organisationSlug, authorUserId, type, status, title, contentText, startsAt, endsAt, isPinned, publishedAt, createdAt)
 v_announcement_comment(id, announcementId, authorUserId, contentText, status, createdAt)
@@ -49,8 +48,52 @@ v_staff_directory(userId, fullName, organisationSlug, jobTitle, departmentId, po
 v_staff(userId, fullName, organisationSlug, jobTitle, employmentStatus, hireDate, departmentId, positionId)
 v_user_skill(id, userId, skillId, organisationSlug)
 v_leave_request(id, requestorId, managerId, leaveStartDate, leaveEndDate, status, leavePolicyId, requestedDuration, durationUnit, createdAt, organisationSlug)
-v_leave_policy(id, name, entitlement, entitlementUnit, recurringPeriod, isPaid, allowFullDay, allowHalfDay, organisationSlug)
+v_leave_policy(id, name, entitlement, entitlementUnit, recurringPeriod, isPaid, allowFullDay, allowHalfDay, applicableAfter, applicableAfterUnit, allowCarryForward, accrualRate, maxAccrual, maxCarryForward, organisationSlug)
+  - spans every organisation the caller has ANY relationship to (their own
+  employer plus every org they have cross-org access/membership to), NOT
+  just their own employer - a caller can have policies from several
+  organisations show up here at once. For "how many leave days does person X
+  have" (X's OWN leave, not a generic policy lookup), you MUST restrict
+  v_leave_policy to X's own employing organisation first - join through
+  v_staff (staffUserId/userId = X's id) or v_leave_request/
+  v_staff_leave_balance (whichever already has X's rows) to get that
+  organisationSlug, then match v_leave_policy.organisationSlug to it. Never
+  join X to every organisationSlug v_leave_policy happens to return.
+  A policy DOES NOT APPLY YET to a staff member whose tenure is under
+  applicableAfter (in applicableAfterUnit, e.g. 12 MONTHS) - if not yet
+  applicable, their remaining days for that policy is 0, not entitlement
+  (confirmed live: a staff member hired under a year ago genuinely has 0
+  Annual Leave available where that policy requires 12 months). v_staff
+  hireDate is a timestamp, not a date - use
+  AGE(CURRENT_DATE, v_staff."hireDate"::date) and compare against
+  (applicableAfter || ' ' || applicableAfterUnit)::interval (e.g.
+  AGE(...) >= (lp."applicableAfter" || ' ' || lp."applicableAfterUnit")::interval),
+  never subtract a timestamp and compare the resulting interval to a bare
+  number - that raises "operator does not exist: interval >= integer".
+  KNOWN GAP: allowCarryForward/accrualRate/maxAccrual/
+  maxCarryForward are NOT factored into the remaining-leave formula below -
+  a long-tenured staff member's real entitlement can exceed the flat
+  `entitlement` value through accrual/carry-forward that this data cannot
+  currently reproduce exactly (confirmed live: a real example showed a
+  higher true balance than the formula below produces). If a computed
+  number seems load-bearing for the user's decision, mention it's based on
+  the base policy terms and may not reflect accrued/carried-forward leave.
 v_staff_leave_balance(id, staffUserId, leavePolicyId, openingBalance, organisationSlug)
+v_budget(id, name, organisationSlug, financialYearId, createdAt) - a named
+  financial budget for an organisation and year. Has no total/amount and no
+  link to a project - "which project has the highest budget" cannot be
+  answered from this table; there is no per-project budget concept in this
+  data. Project-level financial totals come from v_invoice/v_expense/v_scope
+  instead (e.g. sum v_expense.cost grouped by projectSlug). When you
+  substitute like this, SELECT the substituted total under an alias that
+  names what it actually is (e.g. `AS total_spend` or `AS total_expenses`),
+  never `AS budget`/`AS total_budget` - the answer must be spoken as "total
+  spend/expenses" (what was actually computed), not as literal "budget" (a
+  different, unavailable figure) - do not present one as the other.
+v_budget_data(id, accountBudgetId, budgetId, budgetName, organisationSlug, month, year, value)
+  - monthly dollar value per chart-of-accounts line within a budget (an
+  account-level breakdown, not project-level). Use for "what's our budget
+  for account X" or "total budgeted for year Y" style questions.
 v_feedback(id, userId, createdById, completionDate, message, createdAt, organisationSlug)
 v_feedback_submission(id, feedbackId, submitterId, firstAnswer, secondAnswer, status, createdAt, organisationSlug)
 v_staff_note(id, userId, note, createdAt, organisationSlug)
@@ -98,6 +141,14 @@ Notes:
   averages, etc.) should be computed in SQL by joining/aggregating the
   relevant views. Work out which views apply to each specific question rather
   than assuming a fixed formula.
+- When a question asks "which project/company/policy/..." (i.e. wants that
+  entity identified, not just referenced), SELECT its real name column via a
+  join (e.g. v_task.projectSlug -> JOIN v_project ON slug = projectSlug,
+  SELECT v_project.name), not just the slug/id foreign key column alone - a
+  slug is not a name and must never be presented as one. If joining for the
+  name isn't possible for some reason, select the slug/id explicitly so the
+  answer can say it only has the identifier, rather than silently formatting
+  a slug (e.g. "yeni-gate") to look like a name (e.g. "Yeni Gate").
 - v_leave_policy always has a row per policy; v_staff_leave_balance and
   v_leave_request may have no rows at all for a given staff member (not
   everyone has an opening balance or has made a request) - that means "zero",
@@ -107,6 +158,11 @@ Notes:
   v_leave_policy.entitlement + v_staff_leave_balance.openingBalance -
   (sum of their APPROVED v_leave_request.requestedDuration for that policy).
   entitlement is required in this sum - it is not optional or a fallback.
+  Different policies (Annual Leave, Sick Leave, Unpaid Leave, ...) are
+  SEPARATE, non-fungible pools - compute and report this per policy name,
+  never summed into one blended "days left" total across policies, since
+  a policy someone hasn't touched still has its own full entitlement
+  remaining and mixing pools together produces a number that isn't real.
 - Always include an entity's slug/id column alongside its name when selecting
   it (e.g. v_project.slug with v_project.name) - the answer may be used to
   identify that same entity again in a later question.
