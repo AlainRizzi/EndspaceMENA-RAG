@@ -11,7 +11,18 @@ for visibility, they're applied automatically). organisationSlug appears on
 some views as a plain output column only - it is NOT a scoping boundary,
 since a caller can legitimately have visible rows (e.g. project membership)
 across many organisations at once. Never filter on organisationSlug unless
-the question explicitly asks about a specific organisation by name:
+the question explicitly asks about a specific organisation by name.
+
+Every view with a currency column has it because currency is set per
+organisation, not globally - two rows in the same result can legitimately be
+in different currencies. Whenever you SELECT any money amount from a view
+that has a currency column, SELECT currency too and state it alongside every
+number in the final answer (e.g. "AUD 4,320.00", not just "4,320.00") -
+never state a bare number for money without its unit. If a question
+aggregates money across rows that could span more than one organisation
+(e.g. summed/compared across projects or orgs), and their currencies differ,
+say so explicitly rather than presenting one combined total as if it were a
+single currency:
 
 v_project(id, slug, name, organisationSlug, customId, description, status, priority, type, dueDate, startDate, managerId, companyId, createdAt, updatedAt)
   - contains every project the caller is PERMITTED to view, which for a
@@ -31,16 +42,16 @@ v_task(id, name, description, projectSlug, status, ownerId, startDate, dueDate, 
   assume a task has an assignee there just because it has an owner here.
 v_task_assignee(id, taskId, projectSlug, assigneeId, estimatedTime, createdAt)
 v_task_activity(id, taskId, taskName, projectSlug, createdAt)
-v_scope(id, name, slug, customId, projectSlug, organisationSlug, status, type, dueDate, companyId, createdAt, total, subTotal, estDeal, estRevenue, estCostOfSale, forecastRevenue, closeProbability, wonAt)
+v_scope(id, name, slug, customId, projectSlug, organisationSlug, status, type, dueDate, companyId, createdAt, total, subTotal, estDeal, estRevenue, estCostOfSale, forecastRevenue, closeProbability, wonAt, currency)
   - total is the scope's approved/contracted amount ("Contracted Revenue" for
   the project it belongs to). estDeal/estRevenue/estCostOfSale/
   closeProbability are pre-close forecast figures for a not-yet-won scope;
   forecastRevenue = estDeal * closeProbability. wonAt is set once the scope
   is actually won (status = 'WON').
-v_invoice(id, customId, organisationSlug, companyId, projectSlug, scopeSlug, type, issueDate, dueDate, amountPaid, paidAt, paymentStatus, balance)
-v_invoice_item(id, invoiceId, description, quantity, unitPrice, discount, amount)
-v_expense(id, customId, organisationSlug, projectSlug, purchaserId, purchaseDate, dueDate, cost, billed, profit, action)
-v_quote(id, quote_number, job_title, organisationSlug, project_id, issued_on, subtotal, gst, total, status)
+v_invoice(id, customId, organisationSlug, companyId, projectSlug, scopeSlug, type, issueDate, dueDate, amountPaid, paidAt, paymentStatus, balance, currency)
+v_invoice_item(id, invoiceId, description, quantity, unitPrice, discount, amount, currency)
+v_expense(id, customId, organisationSlug, projectSlug, purchaserId, purchaseDate, dueDate, cost, billed, profit, action, currency)
+v_quote(id, quote_number, job_title, organisationSlug, project_id, issued_on, subtotal, gst, total, status, currency)
 v_rate_card(id, rateCardGroupId, positionId, hourlyRate, dailyRate)
 v_announcement(id, organisationSlug, authorUserId, type, status, title, contentText, startsAt, endsAt, isPinned, publishedAt, createdAt)
 v_announcement_comment(id, announcementId, authorUserId, contentText, status, createdAt)
@@ -84,7 +95,7 @@ v_leave_policy(id, name, entitlement, entitlementUnit, recurringPeriod, isPaid, 
   number seems load-bearing for the user's decision, mention it's based on
   the base policy terms and may not reflect accrued/carried-forward leave.
 v_staff_leave_balance(id, staffUserId, leavePolicyId, openingBalance, organisationSlug)
-v_project_budget(projectSlug, budget_total_estimated, labour_cost_actual, expense_cost_actual, contracted_revenue_total)
+v_project_budget(projectSlug, budget_total_estimated, labour_cost_actual, expense_cost_actual, contracted_revenue_total, currency)
   - THIS is per-project budget data - use it for "what's this project's
   budget", "which project has the highest budget", budget used/remaining,
   profit/loss style questions. One row per project.
@@ -102,21 +113,34 @@ v_project_budget(projectSlug, budget_total_estimated, labour_cost_actual, expens
   Derive, don't expect stored: budget_remaining = budget_total_estimated -
   labour_cost_actual - expense_cost_actual; current_profit =
   contracted_revenue_total - labour_cost_actual - expense_cost_actual.
+  For "over/under budget" or "budget overrun" questions specifically:
+  budget_remaining being negative is only a real overrun when
+  budget_total_estimated > 0 for that project - a project with
+  budget_total_estimated = 0 will ALWAYS show as "negative remaining" purely
+  because there's no recorded budget to compare against (see the data gap
+  above), not because it was actually exceeded. Always add
+  WHERE budget_total_estimated > 0 when answering an over/under-budget
+  question, so the comparison is only made among projects that actually have
+  a real budget figure to be over or under.
 v_time_entry(id, taskId, memberId, scopeSlug, invoiceId, recordType, duration, cost, total, dayCreated, createdAt)
   - logged work time per task. memberId is the staff member who logged it
   (join to v_staff_directory for their name). duration is in seconds. No
   billable/non-billable column exists - never claim a time entry is
-  "billable" or filter on it, that distinction isn't tracked here.
+  "billable" or filter on it, that distinction isn't tracked here. If a
+  SUM(duration) for someone returns NULL (no rows at all, not zero rows
+  summed to zero), that means 0 hours logged - state it as 0, do not say you
+  don't have enough information, the same "no rows means zero, not no data"
+  rule as v_leave_request/v_staff_leave_balance.
 v_project_member_rate(projectSlug, staffId, hourlyRate)
   - a staff member's rate specifically on this project (NOT the org-wide
   v_rate_card, which is keyed by position, not by person - project-level
   budget/cost math must use this table when both could apply, matching how
   v_project_budget itself is computed).
-v_budget(id, name, organisationSlug, financialYearId, createdAt) - an
+v_budget(id, name, organisationSlug, financialYearId, createdAt, currency) - an
   org-wide financial budget for a year, with NO link to any project. Never
   use this for a "which project" or per-project budget question - use
   v_project_budget instead.
-v_budget_data(id, accountBudgetId, budgetId, budgetName, organisationSlug, month, year, value)
+v_budget_data(id, accountBudgetId, budgetId, budgetName, organisationSlug, month, year, value, currency)
   - monthly dollar value per chart-of-accounts line within an org-wide
   budget (an account-level breakdown, not project-level). Use for "what's our budget
   for account X" or "total budgeted for year Y" style questions.

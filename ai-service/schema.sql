@@ -384,6 +384,17 @@ CREATE OR REPLACE FUNCTION ai.session_can_see_others_leave() RETURNS boolean AS 
     SELECT ai.session_has_ability('LEAVES', 'UPDATE');
 $$ LANGUAGE sql STABLE;
 
+-- Whether the caller can see OTHER people's time entries (not just their
+-- own) - real catalog entities TIMESHEET_VIEW_ALL / TIMESHEET_MODIFY_OTHERS.
+-- A caller without either can still see their own via the plain memberId =
+-- self check in v_time_entry (matches ai.session_can_see_others_leave's
+-- shape exactly - TIME_ENTRIES/TIMESHEET_VIEW_OWN is the "see my own"
+-- baseline read ability, checked separately in v_time_entry's WHERE clause).
+CREATE OR REPLACE FUNCTION ai.session_can_see_others_time_entries() RETURNS boolean AS $$
+    SELECT ai.session_has_read_ability('TIMESHEET_VIEW_ALL')
+        OR ai.session_has_read_ability('TIMESHEET_MODIFY_OTHERS');
+$$ LANGUAGE sql STABLE;
+
 -- Whether app.user_id (as currently set on this session) should see everything
 -- in app.org_slug's organisation for project-scoped data. Kept for the
 -- project-membership fallback below (PROJECT_VIEW_OTHERS is the "see other
@@ -451,6 +462,21 @@ CREATE OR REPLACE FUNCTION ai.session_visible_orgs() RETURNS SETOF text AS $$
     FROM public."UserOrganisationAccess" uoa
     JOIN public."Organisation" o ON o.id = uoa."organisationId"
     WHERE uoa."userId" = ai.session_user_id();
+$$ LANGUAGE sql STABLE;
+
+-- Currency symbol for an organisation (Organisation.slug ->
+-- OrganisationFinance.currencyId -> Currency.symbol). Currency is org-level,
+-- not per-row - confirmed live: all 20 organisations have a currency
+-- configured, so this is reliable, unlike ProjectMemberRate's sparse data.
+-- Every money-bearing view below joins this in so a dollar figure is never
+-- presented without its unit - a bare "56,979.19" is ambiguous the moment
+-- more than one organisation's data could be involved (e.g. a cross-org
+-- comparison), and every organisation's currency isn't necessarily the same.
+CREATE OR REPLACE FUNCTION ai.org_currency_symbol(org_slug text) RETURNS text AS $$
+    SELECT c.symbol
+    FROM public."OrganisationFinance" ofin
+    JOIN public."Currency" c ON c.id = ofin."currencyId"
+    WHERE ofin."organisationSlug" = org_slug;
 $$ LANGUAGE sql STABLE;
 
 -- ---- Project/task-scoped entities (visible per ai.visible_project_slugs) ----
@@ -531,7 +557,8 @@ CREATE OR REPLACE VIEW ai.v_scope AS
 SELECT sc.id, sc.name, sc.slug, sc."customId", sc."projectSlug", sc."organisationSlug",
        sc.status, sc.type, sc."dueDate", sc."companyId", sc."createdAt",
        sc.total, sc."subTotal", sc."estDeal", sc."estRevenue", sc."estCostOfSale",
-       sc."forecastRevenue", sc."closeProbability", sc."wonAt"
+       sc."forecastRevenue", sc."closeProbability", sc."wonAt",
+       ai.org_currency_symbol(sc."organisationSlug") AS currency
 FROM public."Scope" sc
 WHERE (
     ai.session_has_read_ability('SCOPE')
@@ -553,7 +580,8 @@ CREATE OR REPLACE VIEW ai.v_invoice AS
 -- and 37, "Owner") behaves like VIEW_ALL: the old schema had no
 -- project-linked-only concept, so its holders always saw every invoice.
 SELECT i.id, i."customId", i."organisationSlug", i."companyId", i."projectSlug", i."scopeSlug",
-       i.type, i."issueDate", i."dueDate", i."amountPaid", i."paidAt", i."paymentStatus", i.balance
+       i.type, i."issueDate", i."dueDate", i."amountPaid", i."paidAt", i."paymentStatus", i.balance,
+       ai.org_currency_symbol(i."organisationSlug") AS currency
 FROM public."Invoice" i
 WHERE ai.session_has_read_ability('INVOICE_VIEW_ALL')
    OR ai.session_has_read_ability('INVOICE')
@@ -564,7 +592,8 @@ WHERE ai.session_has_read_ability('INVOICE_VIEW_ALL')
    );
 
 CREATE OR REPLACE VIEW ai.v_invoice_item AS
-SELECT ii.id, ii."invoiceId", ii.description, ii.quantity, ii."unitPrice", ii.discount, ii.amount
+SELECT ii.id, ii."invoiceId", ii.description, ii.quantity, ii."unitPrice", ii.discount, ii.amount,
+       ai.org_currency_symbol(i."organisationSlug") AS currency
 FROM public."InvoiceItem" ii
 JOIN public."Invoice" i ON i.id = ii."invoiceId"
 WHERE ai.session_has_read_ability('INVOICE_VIEW_ALL')
@@ -584,7 +613,8 @@ CREATE OR REPLACE VIEW ai.v_expense AS
 -- 37 - "Owner") behaves like org-wide READ_ALL_LIST for the same reason as
 -- v_invoice's legacy INVOICE fallback above.
 SELECT e.id, e."customId", e."organisationSlug", e."projectSlug", e."purchaserId",
-       e."purchaseDate", e."dueDate", e.cost, e.billed, e.profit, e.action
+       e."purchaseDate", e."dueDate", e.cost, e.billed, e.profit, e.action,
+       ai.org_currency_symbol(e."organisationSlug") AS currency
 FROM public."Expense" e
 WHERE ai.session_has_read_ability('EXPENSE_READ_ALL_LIST')
    OR ai.session_has_read_ability_family('EXPENSE')
@@ -600,7 +630,8 @@ CREATE OR REPLACE VIEW ai.v_quote AS
 -- the closest real analog (a quote is a pre-scope sales document), which is
 -- an approximation, not a literal mapping like the views above.
 SELECT q.id, q.quote_number, q.job_title, q."organisationSlug", q.project_id,
-       q.issued_on, q.subtotal, q.gst, q.total, q.status
+       q.issued_on, q.subtotal, q.gst, q.total, q.status,
+       ai.org_currency_symbol(q."organisationSlug") AS currency
 FROM public."Quote" q
 WHERE (
     ai.session_has_read_ability('SCOPE')
@@ -622,16 +653,32 @@ WHERE (
 -- budgets with no project link at all - do not confuse the two. ----
 
 CREATE OR REPLACE VIEW ai.v_time_entry AS
--- Labour hours/cost logged against a task, project-scoped the same way as
--- v_task (via the task's own projectSlug, or via scopeSlug for the rare
--- case - none observed live, but taskId is nullable at the schema level -
--- of a time entry linked to a scope with no task). No "billable" column
--- exists anywhere on TimeEntry (confirmed) - never invent one.
+-- Labour hours/cost logged against a task. TIME_ENTRIES/TIMESHEET_VIEW_OWN
+-- are the real catalog's own-time-tracking abilities (confirmed live:
+-- Employee Level holds TIME_ENTRIES:READ + TIMESHEET_VIEW_OWN, distinct
+-- from and NOT requiring PROJECT_BUDGET at all - that gate was wrong,
+-- borrowed from v_project_budget's build without checking TimeEntry's own
+-- real catalog entities). A caller with either sees their own entries
+-- (memberId = self); TIMESHEET_VIEW_ALL/TIMESHEET_MODIFY_OTHERS
+-- additionally allows seeing everyone's, same own-vs-others shape as
+-- v_leave_request. Still project-scoped the same way as v_task (via the
+-- task's own projectSlug, or via scopeSlug for the rare case - none
+-- observed live, but taskId is nullable at the schema level - of a time
+-- entry linked to a scope with no task). No "billable" column exists
+-- anywhere on TimeEntry (confirmed) - never invent one.
 SELECT te.id, te."taskId", te."memberId", te."scopeSlug", te."invoiceId",
        te."recordType", te.duration, te.cost, te.total, te."dayCreated", te."createdAt"
 FROM public."TimeEntry" te
 LEFT JOIN public."Task" t ON t.id = te."taskId"
-WHERE ai.session_has_read_ability('PROJECT_BUDGET')
+WHERE (
+    ai.session_has_read_ability('TIME_ENTRIES')
+    OR ai.session_has_read_ability('TIMESHEET_VIEW_OWN')
+    OR ai.session_has_read_ability('TIMESHEET')
+  )
+  AND (
+    te."memberId" = ai.session_user_id()
+    OR ai.session_can_see_others_time_entries()
+  )
   AND (
     (t."projectSlug" IS NOT NULL AND t."projectSlug" IN (SELECT * FROM ai.visible_project_slugs()))
     OR (t."projectSlug" IS NULL AND te."scopeSlug" IN (
@@ -686,19 +733,21 @@ SELECT
     COALESCE(SUM(t.estimated * pmr."hourlyRate") FILTER (WHERE t.id IS NOT NULL), 0) AS budget_total_estimated,
     COALESCE((SELECT SUM(te.cost) FROM public."TimeEntry" te JOIN public."Task" t2 ON t2.id = te."taskId" WHERE t2."projectSlug" = p.slug), 0) AS labour_cost_actual,
     COALESCE((SELECT SUM(e.cost) FROM public."Expense" e WHERE e."projectSlug" = p.slug), 0) AS expense_cost_actual,
-    COALESCE((SELECT SUM(sc.total) FROM public."Scope" sc WHERE sc."projectSlug" = p.slug), 0) AS contracted_revenue_total
+    COALESCE((SELECT SUM(sc.total) FROM public."Scope" sc WHERE sc."projectSlug" = p.slug), 0) AS contracted_revenue_total,
+    ai.org_currency_symbol(p."organisationSlug") AS currency
 FROM public."Project" p
 LEFT JOIN public."Task" t ON t."projectSlug" = p.slug
 LEFT JOIN public."ProjectMemberRate" pmr ON pmr."projectId" = p.id AND pmr."staffId" = t."ownerId"
 WHERE ai.session_has_any_project_read()
   AND p.slug IN (SELECT * FROM ai.visible_project_slugs())
-GROUP BY p.slug;
+GROUP BY p.slug, p."organisationSlug";
 
 CREATE OR REPLACE VIEW ai.v_budget AS
 -- Budget spans every organisation in the database in one table (confirmed:
 -- 41 rows across 20 orgs) with no natural per-row scoping otherwise - same
 -- leak shape as v_leave_policy had, fixed the same way.
-SELECT b.id, b.name, b."organisationSlug", b."financialYearId", b."createdAt"
+SELECT b.id, b.name, b."organisationSlug", b."financialYearId", b."createdAt",
+       ai.org_currency_symbol(b."organisationSlug") AS currency
 FROM public."Budget" b
 WHERE ai.session_has_read_ability('PROJECT_BUDGET')
   AND b."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
@@ -713,7 +762,8 @@ CREATE OR REPLACE VIEW ai.v_budget_data AS
 -- financials live in v_invoice/v_expense/v_scope instead (see schema note
 -- in tools_sql.py).
 SELECT bd.id, bd."accountBudgetId", ab."budgetId", b.name AS "budgetName",
-       ab."organisationSlug", bd.month, bd.year, bd.value
+       ab."organisationSlug", bd.month, bd.year, bd.value,
+       ai.org_currency_symbol(ab."organisationSlug") AS currency
 FROM public."BudgetData" bd
 JOIN public."AccountBudget" ab ON ab.id = bd."accountBudgetId"
 JOIN public."Budget" b ON b.id = ab."budgetId"
@@ -968,5 +1018,6 @@ GRANT USAGE ON SCHEMA public TO ai_readonly;
 GRANT SELECT ON public."Project", public."Task", public."TaskAssignee", public."_members",
     public."User", public."Staff", public."LeaveGroup", public."Ability",
     public."UserOrganisationAccess", public."Organisation", public."BudgetData", public."AccountBudget",
-    public."TimeEntry", public."ProjectMemberRate", public."Scope", public."Expense"
+    public."TimeEntry", public."ProjectMemberRate", public."Scope", public."Expense",
+    public."OrganisationFinance", public."Currency"
     TO ai_readonly;

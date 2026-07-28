@@ -35,7 +35,6 @@ VIEW_ENTITY_FAMILIES: dict[str, list[str]] = {
     "v_expense": ["EXPENSE_READ_ALL_LIST", "EXPENSE_VIEW_PROJECT_LINKED", "EXPENSE"],
     "v_budget": ["PROJECT_BUDGET"],
     "v_budget_data": ["PROJECT_BUDGET"],
-    "v_time_entry": ["PROJECT_BUDGET"],
     "v_project_member_rate": ["PROJECT_BUDGET"],
     "v_project_budget": ["PROJECT_BUDGET"],
     "v_announcement": ["ANNOUNCEMENT"],
@@ -65,6 +64,15 @@ VIEW_ENTITY_FAMILIES: dict[str, list[str]] = {
     # data). Leaving these out means they fall through to "not deniable,
     # whatever rows come back are correct" - same as v_goal/v_objective,
     # which have the identical own-record-or-PEOPLE_INTERNAL shape.
+    #
+    # v_time_entry is absent for the same reason - own row always visible
+    # via TIME_ENTRIES/TIMESHEET_VIEW_OWN + memberId = self (see schema.sql).
+    # Originally built gated on PROJECT_BUDGET by mistake (copied from
+    # v_project_budget's build without checking TimeEntry's own real catalog
+    # entities) - confirmed live this falsely denied Amir Moadad's own "how
+    # many hours did I log" even though his role holds TIME_ENTRIES:READ and
+    # TIMESHEET_VIEW_OWN outright; fixed at the view level, and per the same
+    # own-row precedent above, this pre-check can't safely gate it either.
 }
 
 

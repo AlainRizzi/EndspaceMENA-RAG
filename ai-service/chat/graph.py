@@ -73,10 +73,13 @@ deciding which tool(s) to call. When a prior turn's retrieved data includes
 the real identifier (e.g. a project's slug) for something the question
 refers back to, reuse that exact identifier - never guess or derive one
 (e.g. from a display name) when the real one is already available above.
-Only include steps that are actually needed -
-most questions need 1-2 steps. If the question can be answered without any
-tool (e.g. small talk, or asking what you can help with), return an empty
-steps list.
+Only include steps that are actually needed - most questions need 1-2 steps.
+If the question can be answered directly from the conversation above with NO
+new tool call - either small talk, or the exact fact/value asked for is
+already sitting in a prior turn's retrieved data (e.g. "slug?" right after a
+turn whose data included that project's slug) - return an EMPTY steps list
+rather than re-querying for something already known. Only plan a new tool
+call when the answer genuinely isn't in the data already shown above.
 Each step's args_json must be a JSON-encoded object matching that tool's args."""
 
     result, _usage = await llm_client.call_structured(prompt, Plan)
@@ -141,14 +144,24 @@ def route_after_step(state: AgentState) -> str:
 
 
 async def synthesize_node(state: AgentState) -> dict:
-    history_text = _render_history(state["history"])
-
     if not state["plan_steps"]:
-        prompt = f"""Answer the user's message directly and briefly - no tool
-data was needed for this.
+        # No new tool call this turn - either genuine small talk, or (per
+        # plan_node's own instructions) the answer is already sitting in a
+        # prior turn's retrieved data (e.g. "slug?" right after a turn that
+        # fetched that project). Needs include_raw_data=True for the latter
+        # case - without it this path can only see prior turns' prose, which
+        # deliberately omits slugs/ids, so a direct follow-up asking for one
+        # would have nothing to answer from even though it was already fetched.
+        history_text = _render_history(state["history"], include_raw_data=True)
+        prompt = f"""Answer the user's message directly and briefly. If the
+answer is already present in a prior turn's retrieved data above, use it
+directly (e.g. a project's slug, if the user is asking for it specifically -
+see the raw data attached to prior turns, not just their written-out text).
+Otherwise, no tool data was needed for this message.
 {history_text}
 Message: {state['message']}"""
     else:
+        history_text = _render_history(state["history"])
         def _render_step(r: StepResult) -> str:
             header = f"Step: {r['tool']}({r['args']}) - {r['rationale']}"
             if r["error"] is None:
@@ -177,6 +190,12 @@ step that simply Failed).
 If a step Failed for any other reason, don't expose raw error details -
 acknowledge you couldn't get that piece and answer from what succeeded, or
 say you don't have enough information if nothing useful came back.
+
+A SUM/COUNT/similar aggregate that comes back as NULL (as opposed to a
+present numeric value, including 0) means there were no matching rows to
+aggregate over - state that as "0" (e.g. "0 hours logged"), not as "I don't
+have enough information" or "I couldn't find that" - a NULL aggregate is a
+real, complete answer (zero), not missing data.
 
 Never state a number or fact that isn't actually present in the data below.
 Refer to things by their human-readable name (e.g. a project's name) - never
