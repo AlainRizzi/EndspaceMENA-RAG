@@ -1,21 +1,36 @@
+from chat.permissions import find_missing_entities
+from chat.tools_sql import QueryNotPermittedError
 from db import get_ai_readonly_pool
 from retrieval_service import retrieval_service
 
 
-async def _query_view(sql: str, org_slug: str, user_id: int | None, *params) -> list[dict]:
+async def _query_view(view_name: str, sql: str, user_id: int | None, *params) -> list[dict]:
     """Shared plumbing for every curated read tool below: runs a fixed,
     hand-written query against the ai.v_* views as ai_readonly, with the same
-    per-transaction session GUCs the views' ownership predicates read (see
-    schema.sql). Unlike tools_sql.run_text_to_sql, the SQL here is fixed by
-    us, not LLM-generated - the agent only ever supplies parameters, so no
-    query inspector is needed - but it still goes through ai_readonly/the
-    views rather than the full-privilege pool, so a curated tool can never
-    see more than a generated query could.
+    per-transaction app.user_id GUC the views' Ability/ownership checks read
+    (see schema.sql). No org_slug parameter - the views no longer filter by
+    organisationSlug at all (removed: it was truncating a person's real,
+    legitimately cross-org data - e.g. project membership - down to whichever
+    single org happened to be passed in a request). Unlike
+    tools_sql.run_text_to_sql, the SQL here is fixed by us, not LLM-generated
+    - the agent only ever supplies parameters, so no query inspector is
+    needed - but it still goes through ai_readonly/the views rather than the
+    full-privilege pool, so a curated tool can never see more than a
+    generated query could.
+
+    Same proactive ability pre-check as run_text_to_sql (see permissions.py):
+    without it, a role with no read ability for view_name would just get an
+    empty result here exactly like text-to-SQL did before that fix - a
+    curated tool bypasses SQL generation, but not the underlying permission
+    gate, so it needs the same distinction between "denied" and "empty".
     """
+    denied = await find_missing_entities({view_name}, user_id)
+    if denied:
+        raise QueryNotPermittedError(f"caller's role has no read ability for: {view_name}")
+
     pool = await get_ai_readonly_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.execute("SELECT set_config('app.org_slug', $1, true)", org_slug)
             await conn.execute(
                 "SELECT set_config('app.user_id', $1, true)", str(user_id) if user_id is not None else ""
             )
@@ -23,35 +38,37 @@ async def _query_view(sql: str, org_slug: str, user_id: int | None, *params) -> 
     return [dict(r) for r in rows]
 
 
-async def get_project(project_slug: str, org_slug: str, user_id: int | None) -> dict | None:
+async def get_project(project_slug: str, user_id: int | None) -> dict | None:
+    # slug is unique database-wide (confirmed: Project.slug has a unique
+    # index, not scoped per-org), so no org filter is needed to disambiguate.
     rows = await _query_view(
-        'SELECT * FROM v_project WHERE slug = $1', org_slug, user_id, project_slug
+        "v_project", 'SELECT * FROM v_project WHERE slug = $1', user_id, project_slug
     )
     return rows[0] if rows else None
 
 
-async def list_tasks(project_slug: str, org_slug: str, user_id: int | None) -> list[dict]:
+async def list_tasks(project_slug: str, user_id: int | None) -> list[dict]:
     return await _query_view(
-        'SELECT * FROM v_task WHERE "projectSlug" = $1 ORDER BY "createdAt" DESC',
-        org_slug, user_id, project_slug,
+        "v_task", 'SELECT * FROM v_task WHERE "projectSlug" = $1 ORDER BY "createdAt" DESC',
+        user_id, project_slug,
     )
 
 
-async def get_invoice_status(project_slug: str, org_slug: str, user_id: int | None) -> list[dict]:
+async def get_invoice_status(project_slug: str, user_id: int | None) -> list[dict]:
     return await _query_view(
+        "v_invoice",
         'SELECT id, "customId", "issueDate", "dueDate", "amountPaid", "paymentStatus", balance '
         'FROM v_invoice WHERE "projectSlug" = $1 ORDER BY "issueDate" DESC',
-        org_slug, user_id, project_slug,
+        user_id, project_slug,
     )
 
 
-async def list_my_leave_requests(org_slug: str, user_id: int | None) -> list[dict]:
+async def list_my_leave_requests(user_id: int | None) -> list[dict]:
     # No extra WHERE requestorId filter needed - v_leave_request's ownership
     # predicate (ai.session_can_see_user) already limits a non-manager to
     # their own rows and a manager/admin to everyone's.
     return await _query_view(
-        'SELECT * FROM v_leave_request ORDER BY "leaveStartDate" DESC',
-        org_slug, user_id,
+        "v_leave_request", 'SELECT * FROM v_leave_request ORDER BY "leaveStartDate" DESC', user_id,
     )
 
 

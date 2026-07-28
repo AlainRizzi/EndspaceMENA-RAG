@@ -1,17 +1,34 @@
+from chat.permissions import find_missing_entities
 from chat.sql_guard import UnsafeQueryError, validate_select
 from db import get_ai_readonly_pool
 from llm_client import llm_client
 
 _SCHEMA_DESCRIPTION = """\
-Available read-only views (all already scoped to the caller's organisation and
-to what they're allowed to see - never add your own organisationSlug/userId
-filters, they're applied automatically):
+Available read-only views (all already filtered to what the caller is
+permitted to see, based on their role's abilities and real ownership/
+membership relations - never add your own organisationSlug/userId filters
+for visibility, they're applied automatically). organisationSlug appears on
+some views as a plain output column only - it is NOT a scoping boundary,
+since a caller can legitimately have visible rows (e.g. project membership)
+across many organisations at once. Never filter on organisationSlug unless
+the question explicitly asks about a specific organisation by name:
 
 v_project(id, slug, name, organisationSlug, customId, description, status, priority, type, dueDate, startDate, managerId, companyId, createdAt, updatedAt)
-v_project_member(projectSlug, userId) - userId here may belong to a
-  different organisation than the caller's; that's real cross-org
-  collaboration data, not a leak.
+  - contains every project the caller is PERMITTED to view, which for a
+  manager/admin role can include projects they are not personally a member
+  of. "my projects"/"projects I'm working on"/"projects I'm on" means actual
+  team membership, NOT everything a broad role happens to permit viewing -
+  for that meaning, use v_project_member (below), not v_project, even though
+  v_project would also return a (larger, wrong-for-this-question) result.
+v_project_member(projectSlug, userId) - actual project team membership. Use
+  this, not v_project, for any "my"/"I'm on"/"working on" project question.
+  userId here may belong to a different organisation than the caller's;
+  that's real cross-org collaboration data, not a leak.
 v_task(id, name, description, projectSlug, status, ownerId, startDate, dueDate, estimated, logged, taskType, flagged, isDeleted, createdAt, updatedAt)
+  - ownerId is who the task actually belongs to in this data - "who has/owns
+  this task", "my tasks", "tasks assigned to X" should filter on v_task.ownerId
+  first. v_task_assignee (below) is a separate, often-empty table - do not
+  assume a task has an assignee there just because it has an owner here.
 v_task_assignee(id, taskId, projectSlug, assigneeId, estimatedTime, createdAt)
 v_task_activity(id, taskId, taskName, projectSlug, createdAt)
 v_scope(id, name, slug, customId, projectSlug, organisationSlug, status, type, dueDate, companyId, createdAt)
@@ -132,8 +149,10 @@ async def generate_sql(question: str, user_id: int | None, retry_error: str | No
     prompt = f"""You write a single read-only PostgreSQL SELECT query to answer a
 question, using ONLY the views listed below. Never invent columns or tables.
 
-Never add WHERE clauses for organisationSlug - tenant isolation is already
-enforced by the views themselves.
+Never add WHERE clauses for organisationSlug - visibility is already enforced
+by the views themselves via the caller's role abilities and real ownership/
+membership relations, and organisationSlug is not a scoping boundary (a
+caller can legitimately have visible rows spanning many organisations).
 
 {caller_line} Two different things both use "userId" but must not be
 confused: (a) VISIBILITY - which rows the caller is even allowed to see is
@@ -164,17 +183,30 @@ Return only the SQL query."""
     return result.sql
 
 
-async def _validate_and_run(sql: str, org_slug: str, user_id: int | None) -> list[dict]:
-    safe_sql = validate_select(sql)  # UnsafeQueryError propagates uncaught - not retryable
+async def _validate_and_run(sql: str, user_id: int | None) -> list[dict]:
+    safe_sql, referenced_views = validate_select(sql)  # UnsafeQueryError propagates uncaught - not retryable
+
+    # Proactive check, before the query ever runs: if the caller's role holds
+    # NONE of a referenced view's real abilities, the query is guaranteed to
+    # come back empty specifically because of that - not because the data
+    # happens to be empty. Catching this here (rather than inferring it from
+    # an empty result afterward) is the only way to tell those two cases
+    # apart, since a genuinely-empty allowed view and a permission-filtered
+    # view are otherwise indistinguishable by the time rows come back.
+    denied_views = await find_missing_entities(referenced_views, user_id)
+    if denied_views:
+        raise QueryNotPermittedError(
+            f"caller's role has no read ability for: {', '.join(sorted(denied_views))}"
+        )
 
     pool = await get_ai_readonly_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Session-local GUCs (not connection-wide) - set_config's third
-            # arg (is_local=true) scopes them to this transaction only, so a
-            # pooled connection can never leak one request's org/user into
-            # the next request that reuses it.
-            await conn.execute("SELECT set_config('app.org_slug', $1, true)", org_slug)
+            # Session-local GUC (not connection-wide) - set_config's third
+            # arg (is_local=true) scopes it to this transaction only, so a
+            # pooled connection can never leak one request's user into the
+            # next request that reuses it. No app.org_slug here - no view
+            # reads it (see schema.sql: Ability is the only access gate).
             await conn.execute(
                 "SELECT set_config('app.user_id', $1, true)", str(user_id) if user_id is not None else ""
             )
@@ -183,9 +215,9 @@ async def _validate_and_run(sql: str, org_slug: str, user_id: int | None) -> lis
     return [dict(r) for r in rows]
 
 
-async def run_text_to_sql(question: str, org_slug: str, user_id: int | None) -> list[dict]:
+async def run_text_to_sql(question: str, user_id: int | None) -> list[dict]:
     """Full pipeline: LLM drafts SQL -> query inspector validates/caps it ->
-    executes as ai_readonly with the session GUCs the views' RLS/ownership
+    executes as ai_readonly with the session GUC the views' RLS/ownership
     predicates read (see schema.sql: ai.session_user_id(), visible_project_slugs()).
 
     One retry on a database error (e.g. a wrong column/alias) with the error
@@ -195,16 +227,23 @@ async def run_text_to_sql(question: str, org_slug: str, user_id: int | None) -> 
     """
     raw_sql = await generate_sql(question, user_id)
     try:
-        return await _validate_and_run(raw_sql, org_slug, user_id)
+        return await _validate_and_run(raw_sql, user_id)
     except UnsafeQueryError as e:
         # Not retried - the model reaching for a disallowed table/column
         # isn't a syntax mistake a retry would fix, it's the fence working.
         raise QueryNotPermittedError(str(e)) from e
+    except QueryNotPermittedError:
+        # Not retried either - raised directly by _validate_and_run's ability
+        # pre-check. A retry can't fix "the caller's role doesn't have this
+        # ability" by rewriting the query differently.
+        raise
     except Exception as e:
         retry_sql = await generate_sql(question, user_id, retry_error=str(e))
         try:
-            return await _validate_and_run(retry_sql, org_slug, user_id)
+            return await _validate_and_run(retry_sql, user_id)
         except UnsafeQueryError as retry_e:
             raise QueryNotPermittedError(str(retry_e)) from retry_e
+        except QueryNotPermittedError:
+            raise
         except Exception as retry_e:
             raise TextToSqlError(f"query failed after retry: {retry_e}") from retry_e

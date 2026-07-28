@@ -15,29 +15,32 @@ class ToolSpec:
 
 
 async def _run_get_project(org_slug: str, user_id: int | None, *, project_slug: str) -> dict | None:
-    return await tools_read.get_project(project_slug, org_slug, user_id)
+    return await tools_read.get_project(project_slug, user_id)
 
 
 async def _run_list_tasks(org_slug: str, user_id: int | None, *, project_slug: str) -> list[dict]:
-    return await tools_read.list_tasks(project_slug, org_slug, user_id)
+    return await tools_read.list_tasks(project_slug, user_id)
 
 
 async def _run_get_invoice_status(org_slug: str, user_id: int | None, *, project_slug: str) -> list[dict]:
-    return await tools_read.get_invoice_status(project_slug, org_slug, user_id)
+    return await tools_read.get_invoice_status(project_slug, user_id)
 
 
 async def _run_list_my_leave_requests(org_slug: str, user_id: int | None) -> list[dict]:
-    return await tools_read.list_my_leave_requests(org_slug, user_id)
+    return await tools_read.list_my_leave_requests(user_id)
 
 
 async def _run_search_knowledge_base(
     org_slug: str, user_id: int | None, *, query: str, project_slug: str | None = None
 ) -> list[dict]:
+    # search_knowledge_base genuinely still needs org_slug - it queries
+    # RagChunk via retrieval_service, a different subsystem from the ai.v_*
+    # Ability-gated views, and RagChunk really is org-scoped.
     return await tools_read.search_knowledge_base(query, org_slug, project_slug)
 
 
 async def _run_query_data(org_slug: str, user_id: int | None, *, question: str) -> list[dict]:
-    return await tools_sql.run_text_to_sql(question, org_slug, user_id)
+    return await tools_sql.run_text_to_sql(question, user_id)
 
 
 # Every tool description below is shown to the plan-generating LLM verbatim -
@@ -101,7 +104,15 @@ TOOLS: dict[str, ToolSpec] = {
             "etc.) plus aggregates/joins across them. Use this ONLY when no curated tool "
             "above matches the question - e.g. counts, comparisons, filters, or questions "
             "spanning multiple entities ('which projects have unpaid invoices over 30 days "
-            "overdue', 'how many tasks does each project have'). Args: question (string)."
+            "overdue', 'how many tasks does each project have'). "
+            "The question you pass here is the ONLY thing the SQL generator sees - it has "
+            "no access to this conversation's history. If the user's message is a short "
+            "follow-up that only makes sense given an earlier turn (e.g. 'by organisation' "
+            "right after 'how many members in each department?', or 'and last month?'), "
+            "rewrite it into one fully self-contained question that restates what's being "
+            "counted/filtered plus the new change (e.g. 'how many staff members are there "
+            "in each organisation?', not just 'by organisation') - never pass the short "
+            "fragment through as-is. Args: question (string)."
         ),
         run=_run_query_data,
     ),

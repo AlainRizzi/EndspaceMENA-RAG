@@ -42,11 +42,14 @@ class UnsafeQueryError(ValueError):
     pass
 
 
-def validate_select(sql: str) -> str:
+def validate_select(sql: str) -> tuple[str, set[str]]:
     """Rejects anything that isn't a single, plain SELECT touching only
-    ALLOWED_VIEWS. Returns the query with a LIMIT enforced (caps it down if
-    the generated query already has one higher than MAX_ROW_LIMIT, adds one
-    if missing). Raises UnsafeQueryError with the reason otherwise.
+    ALLOWED_VIEWS. Returns (normalized_sql, referenced_views) - the LIMIT is
+    enforced (capped down if the generated query already has one higher than
+    MAX_ROW_LIMIT, added if missing), and referenced_views is every view name
+    the query touches, for the caller to cross-check against the caller's
+    real abilities (see permissions.py) before running it. Raises
+    UnsafeQueryError with the reason if the query is unsafe to run at all.
 
     This is the query inspector from the implementation guide (Part B.5): the
     generated SQL is untrusted output from an LLM, which may have been
@@ -72,6 +75,7 @@ def validate_select(sql: str) -> str:
         if isinstance(node, forbidden_types):
             raise UnsafeQueryError(f"forbidden statement type: {type(node).__name__}")
 
+    referenced_views: set[str] = set()
     for table in stmt.find_all(exp.Table):
         table_name = table.name
         schema_name = table.db or ""  # sqlglot returns '' (not None) for an unqualified table
@@ -79,6 +83,7 @@ def validate_select(sql: str) -> str:
             raise UnsafeQueryError(f"schema not allowed: {schema_name}")
         if table_name not in ALLOWED_VIEWS:
             raise UnsafeQueryError(f"table/view not allowed: {table_name}")
+        referenced_views.add(table_name)
 
     # No function calls that could reach outside the row-filtering the views
     # already do - e.g. dblink, pg_read_file, current_setting() tampering.
@@ -111,4 +116,4 @@ def validate_select(sql: str) -> str:
     else:
         stmt.set("limit", exp.Limit(expression=exp.Literal.number(MAX_ROW_LIMIT)))
 
-    return stmt.sql(dialect="postgres")
+    return stmt.sql(dialect="postgres"), referenced_views
