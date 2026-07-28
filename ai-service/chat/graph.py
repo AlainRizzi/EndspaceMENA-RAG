@@ -189,13 +189,19 @@ have the name, or use the raw identifier and note it's an identifier, not
 present it as if it were the name.
 
 Sometimes the data below answers the question using a substituted or
-related figure, not the literally-named one (e.g. the question asks about
-"budget" but the data has a total_spend/total_expenses column, because no
-per-project budget exists and spend is the closest real answer) - a
-descriptively-named column like that is intentional, not missing data:
-answer using it, and briefly say what it actually reflects (e.g. "based on
-total recorded expenses" or "based on total spend") rather than refusing
-just because the exact word from the question isn't the column's name.
+related figure, not the literally-named one (e.g. a column named
+total_spend/total_expenses when no more directly-named figure exists for
+that specific question) - a descriptively-named column like that is
+intentional, not missing data: answer using it, and briefly say what it
+actually reflects rather than refusing just because the exact word from the
+question isn't the column's name.
+
+If a "highest"/"lowest"/ranking question's data comes back with every row
+tied at the same value (especially 0 or NULL), that is a strong sign of a
+data gap, not a real answer - do not pick one row and present it as "the
+highest" when the ranking is meaningless (every candidate tied). Say
+plainly that the data needed to answer isn't recorded/available rather than
+naming an arbitrary row as if the comparison were real.
 {history_text}
 Question: {state['message']}
 

@@ -6,7 +6,8 @@ from sqlglot import exp
 # since ai_readonly's search_path is ai, public and every view lives in ai.
 ALLOWED_VIEWS = {
     "v_project", "v_project_member", "v_task", "v_task_assignee", "v_task_activity", "v_scope",
-    "v_invoice", "v_invoice_item", "v_expense", "v_quote", "v_budget", "v_rate_card",
+    "v_invoice", "v_invoice_item", "v_expense", "v_quote", "v_budget", "v_budget_data", "v_rate_card",
+    "v_time_entry", "v_project_member_rate", "v_project_budget",
     "v_announcement", "v_announcement_comment", "v_contact", "v_company_contact",
     "v_department", "v_position", "v_skill",
     "v_staff_directory", "v_staff", "v_user_skill", "v_leave_request", "v_leave_policy", "v_staff_leave_balance",
@@ -32,6 +33,16 @@ _MIXED_CASE_COLUMNS = {
     "staffUserId", "openingBalance", "createdById", "completionDate", "feedbackId",
     "submitterId", "firstAnswer", "secondAnswer", "goalId", "fullName", "jobTitle",
     "employmentStatus", "hireDate", "amountPaid", "paidAt", "paymentStatus", "issueDate",
+    # v_leave_policy eligibility/accrual columns (added when applicableAfter
+    # eligibility gating was built - previously missing here, meaning these
+    # would have silently failed to auto-quote in any generated query).
+    "applicableAfter", "applicableAfterUnit", "allowCarryForward", "accrualRate",
+    "maxAccrual", "maxCarryForward",
+    # v_scope money columns (Tier 1 GraySync Formulas integration)
+    "subTotal", "estDeal", "estRevenue", "estCostOfSale", "forecastRevenue",
+    "closeProbability", "wonAt",
+    # v_time_entry / v_project_member_rate / v_project_budget (Tier 1)
+    "memberId", "recordType", "dayCreated", "staffId",
 }
 _MIXED_CASE_COLUMNS_LOWER = {c.lower(): c for c in _MIXED_CASE_COLUMNS}
 

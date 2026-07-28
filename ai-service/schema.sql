@@ -521,8 +521,17 @@ CREATE OR REPLACE VIEW ai.v_scope AS
 -- the real catalog's scope-read abilities (defaults.json "Scopes" tab) -
 -- any one grants read access here; which projects' scopes are visible still
 -- follows the same project-read fallback as everything else project-scoped.
+-- Money columns (total, subTotal, estDeal, estRevenue, estCostOfSale,
+-- forecastRevenue, closeProbability, wonAt) added per the GraySync Formulas
+-- reference: Scope.total is the real "Contracted Revenue" for a project
+-- (page 7: "Approved service amount from scope"), and estDeal/estRevenue/
+-- estCostOfSale/closeProbability/forecastRevenue answer the scope-level
+-- forecast fields (page 22) directly - all plain stored columns already on
+-- Scope, no new joins or gating needed.
 SELECT sc.id, sc.name, sc.slug, sc."customId", sc."projectSlug", sc."organisationSlug",
-       sc.status, sc.type, sc."dueDate", sc."companyId", sc."createdAt"
+       sc.status, sc.type, sc."dueDate", sc."companyId", sc."createdAt",
+       sc.total, sc."subTotal", sc."estDeal", sc."estRevenue", sc."estCostOfSale",
+       sc."forecastRevenue", sc."closeProbability", sc."wonAt"
 FROM public."Scope" sc
 WHERE (
     ai.session_has_read_ability('SCOPE')
@@ -604,6 +613,86 @@ WHERE (
         SELECT p.id FROM public."Project" p WHERE p.slug IN (SELECT * FROM ai.visible_project_slugs())
     )
   );
+
+-- ---- Project-level budget/labour cost (GraySync Formulas reference - see
+-- the "Allocated Budget" bug this was built to fix: GraySync's own UI shows
+-- a per-project budget figure that is NOT stored anywhere, it's computed
+-- live as SUM(Task.estimated x that task's owner's ProjectMemberRate.hourlyRate).
+-- Distinct from v_budget/v_budget_data below, which are org-wide financial
+-- budgets with no project link at all - do not confuse the two. ----
+
+CREATE OR REPLACE VIEW ai.v_time_entry AS
+-- Labour hours/cost logged against a task, project-scoped the same way as
+-- v_task (via the task's own projectSlug, or via scopeSlug for the rare
+-- case - none observed live, but taskId is nullable at the schema level -
+-- of a time entry linked to a scope with no task). No "billable" column
+-- exists anywhere on TimeEntry (confirmed) - never invent one.
+SELECT te.id, te."taskId", te."memberId", te."scopeSlug", te."invoiceId",
+       te."recordType", te.duration, te.cost, te.total, te."dayCreated", te."createdAt"
+FROM public."TimeEntry" te
+LEFT JOIN public."Task" t ON t.id = te."taskId"
+WHERE ai.session_has_read_ability('PROJECT_BUDGET')
+  AND (
+    (t."projectSlug" IS NOT NULL AND t."projectSlug" IN (SELECT * FROM ai.visible_project_slugs()))
+    OR (t."projectSlug" IS NULL AND te."scopeSlug" IN (
+          SELECT slug FROM public."Scope" WHERE "projectSlug" IN (SELECT * FROM ai.visible_project_slugs())
+    ))
+  );
+
+CREATE OR REPLACE VIEW ai.v_project_member_rate AS
+-- Per-project rate override. Per the GraySync Formulas reference (verbatim,
+-- their own red-text note): "Rate card is coming from the project people
+-- table not from the organisation rate card settings" - i.e. for
+-- project-level budget/labour-cost math, this table is the source of
+-- truth, NOT ai.v_rate_card (which is the org-wide fallback, keyed by
+-- position, not by person-on-this-project).
+SELECT pmr.id, p.slug AS "projectSlug", pmr."staffId", pmr."hourlyRate"
+FROM public."ProjectMemberRate" pmr
+JOIN public."Project" p ON p.id = pmr."projectId"
+WHERE ai.session_has_read_ability('PROJECT_BUDGET')
+  AND p.slug IN (SELECT * FROM ai.visible_project_slugs());
+
+-- Project-level financial rollup: the real "Allocated Budget" fix.
+-- budget_total_estimated = SUM(Task.estimated x that task owner's
+-- ProjectMemberRate.hourlyRate), per the GraySync Formulas reference
+-- ("Budget Total (Allocated budget) = Estimated resource cost = Sum of
+-- Estimated time for each task x Rate Card"). CONFIRMED LIVE: ProjectMemberRate
+-- has only 3 rows in this database at time of writing - a project with
+-- tasks but no matching ProjectMemberRate row will show
+-- budget_total_estimated = 0, which is a data-completeness gap, not a real
+-- zero budget (see the schema note in chat/tools_sql.py, which tells the
+-- agent to say so rather than state 0 as fact).
+--
+-- UNRESOLVED, FLAG FOR THE GRAYSYNC TEAM: labour_cost_actual sums
+-- TimeEntry.cost (matching the reference's literal field name, "Cost =
+-- Tracking Time * Cost Rate"), but this is NOT fully confirmed against
+-- real duration-based rate math - checked live: for one staff member,
+-- TimeEntry.total / (duration in hours) was a flat, consistent rate across
+-- every entry (e.g. always $180/hr), while TimeEntry.cost / duration
+-- varied wildly entry-to-entry (65, 360, 515, 540 per hour) for the SAME
+-- person - meaning .total behaves like a clean rate x duration figure and
+-- .cost does not, for at least this sample. Left as .cost per the
+-- reference's literal wording, but this should be confirmed against
+-- GraySync's actual backend calculation before being treated as authoritative.
+--
+-- current_profit and budget_remaining are deliberately NOT stored columns
+-- here - derived by the agent from the four columns below
+-- (contracted_revenue_total - labour_cost_actual - expense_cost_actual,
+-- and budget_total_estimated - labour_cost_actual - expense_cost_actual
+-- respectively), same pattern as v_leave_policy's remaining-balance formula.
+CREATE OR REPLACE VIEW ai.v_project_budget AS
+SELECT
+    p.slug AS "projectSlug",
+    COALESCE(SUM(t.estimated * pmr."hourlyRate") FILTER (WHERE t.id IS NOT NULL), 0) AS budget_total_estimated,
+    COALESCE((SELECT SUM(te.cost) FROM public."TimeEntry" te JOIN public."Task" t2 ON t2.id = te."taskId" WHERE t2."projectSlug" = p.slug), 0) AS labour_cost_actual,
+    COALESCE((SELECT SUM(e.cost) FROM public."Expense" e WHERE e."projectSlug" = p.slug), 0) AS expense_cost_actual,
+    COALESCE((SELECT SUM(sc.total) FROM public."Scope" sc WHERE sc."projectSlug" = p.slug), 0) AS contracted_revenue_total
+FROM public."Project" p
+LEFT JOIN public."Task" t ON t."projectSlug" = p.slug
+LEFT JOIN public."ProjectMemberRate" pmr ON pmr."projectId" = p.id AND pmr."staffId" = t."ownerId"
+WHERE ai.session_has_any_project_read()
+  AND p.slug IN (SELECT * FROM ai.visible_project_slugs())
+GROUP BY p.slug;
 
 CREATE OR REPLACE VIEW ai.v_budget AS
 -- Budget spans every organisation in the database in one table (confirmed:
@@ -864,6 +953,7 @@ GRANT USAGE ON SCHEMA ai TO ai_readonly;
 GRANT SELECT ON
     ai.v_project, ai.v_project_member, ai.v_task, ai.v_task_assignee, ai.v_task_activity, ai.v_scope,
     ai.v_invoice, ai.v_invoice_item, ai.v_expense, ai.v_quote, ai.v_budget, ai.v_budget_data, ai.v_rate_card,
+    ai.v_time_entry, ai.v_project_member_rate, ai.v_project_budget,
     ai.v_announcement, ai.v_announcement_comment, ai.v_contact, ai.v_company_contact,
     ai.v_department, ai.v_position, ai.v_skill,
     ai.v_staff_directory, ai.v_staff, ai.v_user_skill, ai.v_leave_request, ai.v_leave_policy, ai.v_staff_leave_balance,
@@ -877,5 +967,6 @@ GRANT SELECT ON
 GRANT USAGE ON SCHEMA public TO ai_readonly;
 GRANT SELECT ON public."Project", public."Task", public."TaskAssignee", public."_members",
     public."User", public."Staff", public."LeaveGroup", public."Ability",
-    public."UserOrganisationAccess", public."Organisation", public."BudgetData", public."AccountBudget"
+    public."UserOrganisationAccess", public."Organisation", public."BudgetData", public."AccountBudget",
+    public."TimeEntry", public."ProjectMemberRate", public."Scope", public."Expense"
     TO ai_readonly;

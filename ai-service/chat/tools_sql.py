@@ -31,7 +31,12 @@ v_task(id, name, description, projectSlug, status, ownerId, startDate, dueDate, 
   assume a task has an assignee there just because it has an owner here.
 v_task_assignee(id, taskId, projectSlug, assigneeId, estimatedTime, createdAt)
 v_task_activity(id, taskId, taskName, projectSlug, createdAt)
-v_scope(id, name, slug, customId, projectSlug, organisationSlug, status, type, dueDate, companyId, createdAt)
+v_scope(id, name, slug, customId, projectSlug, organisationSlug, status, type, dueDate, companyId, createdAt, total, subTotal, estDeal, estRevenue, estCostOfSale, forecastRevenue, closeProbability, wonAt)
+  - total is the scope's approved/contracted amount ("Contracted Revenue" for
+  the project it belongs to). estDeal/estRevenue/estCostOfSale/
+  closeProbability are pre-close forecast figures for a not-yet-won scope;
+  forecastRevenue = estDeal * closeProbability. wonAt is set once the scope
+  is actually won (status = 'WON').
 v_invoice(id, customId, organisationSlug, companyId, projectSlug, scopeSlug, type, issueDate, dueDate, amountPaid, paidAt, paymentStatus, balance)
 v_invoice_item(id, invoiceId, description, quantity, unitPrice, discount, amount)
 v_expense(id, customId, organisationSlug, projectSlug, purchaserId, purchaseDate, dueDate, cost, billed, profit, action)
@@ -79,20 +84,41 @@ v_leave_policy(id, name, entitlement, entitlementUnit, recurringPeriod, isPaid, 
   number seems load-bearing for the user's decision, mention it's based on
   the base policy terms and may not reflect accrued/carried-forward leave.
 v_staff_leave_balance(id, staffUserId, leavePolicyId, openingBalance, organisationSlug)
-v_budget(id, name, organisationSlug, financialYearId, createdAt) - a named
-  financial budget for an organisation and year. Has no total/amount and no
-  link to a project - "which project has the highest budget" cannot be
-  answered from this table; there is no per-project budget concept in this
-  data. Project-level financial totals come from v_invoice/v_expense/v_scope
-  instead (e.g. sum v_expense.cost grouped by projectSlug). When you
-  substitute like this, SELECT the substituted total under an alias that
-  names what it actually is (e.g. `AS total_spend` or `AS total_expenses`),
-  never `AS budget`/`AS total_budget` - the answer must be spoken as "total
-  spend/expenses" (what was actually computed), not as literal "budget" (a
-  different, unavailable figure) - do not present one as the other.
+v_project_budget(projectSlug, budget_total_estimated, labour_cost_actual, expense_cost_actual, contracted_revenue_total)
+  - THIS is per-project budget data - use it for "what's this project's
+  budget", "which project has the highest budget", budget used/remaining,
+  profit/loss style questions. One row per project.
+  budget_total_estimated = the project's allocated/estimated budget (sum of
+  each task's estimated time x that task owner's project-specific rate -
+  see v_project_member_rate below). KNOWN DATA GAP: if a project has tasks
+  but budget_total_estimated is 0, that means no project-specific rates are
+  recorded for its task owners in this environment - say so explicitly
+  (e.g. "no rate data recorded for this project's team, so an estimated
+  budget can't be computed") rather than stating 0 as the real budget.
+  labour_cost_actual = actual logged labour cost so far (from v_time_entry).
+  expense_cost_actual = actual expense cost so far (from v_expense).
+  contracted_revenue_total = sum of the project's scopes' contracted amount
+  (v_scope.total).
+  Derive, don't expect stored: budget_remaining = budget_total_estimated -
+  labour_cost_actual - expense_cost_actual; current_profit =
+  contracted_revenue_total - labour_cost_actual - expense_cost_actual.
+v_time_entry(id, taskId, memberId, scopeSlug, invoiceId, recordType, duration, cost, total, dayCreated, createdAt)
+  - logged work time per task. memberId is the staff member who logged it
+  (join to v_staff_directory for their name). duration is in seconds. No
+  billable/non-billable column exists - never claim a time entry is
+  "billable" or filter on it, that distinction isn't tracked here.
+v_project_member_rate(projectSlug, staffId, hourlyRate)
+  - a staff member's rate specifically on this project (NOT the org-wide
+  v_rate_card, which is keyed by position, not by person - project-level
+  budget/cost math must use this table when both could apply, matching how
+  v_project_budget itself is computed).
+v_budget(id, name, organisationSlug, financialYearId, createdAt) - an
+  org-wide financial budget for a year, with NO link to any project. Never
+  use this for a "which project" or per-project budget question - use
+  v_project_budget instead.
 v_budget_data(id, accountBudgetId, budgetId, budgetName, organisationSlug, month, year, value)
-  - monthly dollar value per chart-of-accounts line within a budget (an
-  account-level breakdown, not project-level). Use for "what's our budget
+  - monthly dollar value per chart-of-accounts line within an org-wide
+  budget (an account-level breakdown, not project-level). Use for "what's our budget
   for account X" or "total budgeted for year Y" style questions.
 v_feedback(id, userId, createdById, completionDate, message, createdAt, organisationSlug)
 v_feedback_submission(id, feedbackId, submitterId, firstAnswer, secondAnswer, status, createdAt, organisationSlug)
