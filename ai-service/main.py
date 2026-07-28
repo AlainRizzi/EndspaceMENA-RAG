@@ -5,6 +5,7 @@ from arq import create_pool
 from arq.connections import RedisSettings
 from arq.jobs import Job
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 
 from capabilities.registry import CAPABILITIES
 from chat.checkpointer import close_checkpointer, init_checkpointer
@@ -35,6 +36,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="GraySync AI Service", lifespan=lifespan)
 app.include_router(chat_router)
+
+
+@app.get("/chat-demo")
+async def chat_demo():
+    """Standalone demo page for the chatbot - not part of the real GraySync
+    frontend, just a way to see /chat working without one. See chat/demo.html.
+    """
+    return FileResponse("chat/demo.html")
 
 
 @app.post("/ai/{capability_name}")

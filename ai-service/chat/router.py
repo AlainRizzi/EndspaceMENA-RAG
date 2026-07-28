@@ -42,6 +42,7 @@ async def chat(body: ChatIn):
     async def event_stream():
         yield f"event: conversation\ndata: {json.dumps({'conversationId': conversation_id})}\n\n"
 
+        step_results: list[dict] = []
         try:
             app = _graph()
             config = {"configurable": {"thread_id": f"conv-{conversation_id}"}}
@@ -60,12 +61,16 @@ async def chat(body: ChatIn):
                 config=config,
             )
             answer = result["answer"]
+            step_results = result["step_results"]
         except Exception as e:
             logger.exception("chat turn failed (conversation %s)", conversation_id)
             answer = "Sorry, something went wrong answering that."
             yield f"event: error\ndata: {json.dumps({'message': str(e) or type(e).__name__})}\n\n"
 
-        await save_message(conversation_id, body.organisationSlug, "assistant", answer)
+        # step_results carries this turn's raw tool data (e.g. real project
+        # slugs) forward into future turns' history - see
+        # persistence.get_recent_history's docstring for why this matters.
+        await save_message(conversation_id, body.organisationSlug, "assistant", answer, tool_calls=step_results)
         yield f"event: message\ndata: {json.dumps({'role': 'assistant', 'content': answer})}\n\n"
         yield "event: done\ndata: {}\n\n"
 

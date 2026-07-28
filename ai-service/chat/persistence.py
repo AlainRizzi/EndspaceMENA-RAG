@@ -36,7 +36,9 @@ async def save_message(
             RETURNING id
             """,
             conversation_id, org_slug, role, content,
-            json.dumps(tool_calls) if tool_calls is not None else None,
+            # default=str: tool results can carry datetimes (e.g. createdAt
+            # columns from a raw DB row) that json.dumps can't serialize natively.
+            json.dumps(tool_calls, default=str) if tool_calls is not None else None,
         )
         await conn.execute(
             'UPDATE conversations SET "updatedAt" = now() WHERE id = $1', conversation_id
@@ -69,13 +71,23 @@ async def get_recent_history(conversation_id: int) -> list[dict]:
     """Last _HISTORY_LIMIT messages, oldest first, for including in the
     plan/synthesis prompts so follow-up questions ("has it been invoiced?")
     can resolve references to earlier turns.
+
+    Includes toolCalls (raw tool results, e.g. {"slug": "yeni-gate", "name":
+    "Marketing and Tech"}) alongside content (the synthesized, human-readable
+    answer, e.g. "Your project is Marketing and Tech"). Both are needed: an
+    assistant message's text is written to be readable (names, not internal
+    slugs/ids), so a later turn resolving "that project" into a tool call has
+    nothing but the display name to go on unless the raw identifiers are
+    still available - confirmed this was actually happening (a project name
+    was slugified into a plausible but wrong project_slug for a later
+    list_tasks call) before toolCalls was included here.
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT role, content FROM (
-                SELECT role, content, "createdAt" FROM messages
+            SELECT role, content, "toolCalls" FROM (
+                SELECT role, content, "toolCalls", "createdAt" FROM messages
                 WHERE "conversationId" = $1
                 ORDER BY "createdAt" DESC
                 LIMIT $2
@@ -84,7 +96,14 @@ async def get_recent_history(conversation_id: int) -> list[dict]:
             """,
             conversation_id, _HISTORY_LIMIT,
         )
-        return [{"role": r["role"], "content": r["content"]} for r in rows]
+        return [
+            {
+                "role": r["role"],
+                "content": r["content"],
+                "toolCalls": json.loads(r["toolCalls"]) if r["toolCalls"] else None,
+            }
+            for r in rows
+        ]
 
 
 async def log_tool_call(

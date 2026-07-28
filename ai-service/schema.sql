@@ -312,6 +312,18 @@ FROM public."TaskAssignee" ta
 JOIN public."Task" t ON t.id = ta."taskId"
 WHERE t."projectSlug" IN (SELECT * FROM ai.visible_project_slugs());
 
+CREATE OR REPLACE VIEW ai.v_project_member AS
+-- Project team membership (_members: Project<->Staff) - without this, "which
+-- projects am I on" is unanswerable by SQL: v_project's own visibility rule
+-- already reflects membership internally, but doesn't expose the membership
+-- fact itself as data, so a query has nothing to filter by beyond "everything
+-- I can see" (which, for a manager/admin, is indistinguishable from "all
+-- projects"). This surfaces the actual relationship.
+SELECT p.slug AS "projectSlug", m."B" AS "userId"
+FROM public."_members" m
+JOIN public."Project" p ON p.id = m."A"
+WHERE p.slug IN (SELECT * FROM ai.visible_project_slugs());
+
 CREATE OR REPLACE VIEW ai.v_task_activity AS
 SELECT ta.id, ta."taskId", t.name AS "taskName", t."projectSlug", ta."createdAt"
 FROM public."TaskActivity" ta
@@ -426,11 +438,35 @@ WHERE s."organisationSlug" = current_setting('app.org_slug', true);
 
 -- ---- Record-owned entities ("own" = about me, or a manager/admin viewing anyone) ----
 
+-- Directory-level identity: no personal-record ownership gate (see v_staff
+-- below for that). A name/jobTitle lookup is needed to resolve WHO is on a
+-- team/project (e.g. "who are my teammates"), which is not a
+-- personal-privacy question the way leave/salary is.
+--
+-- Visible to the caller if EITHER they're in the caller's own organisation,
+-- OR they share a project with the caller (ai.v_project_member has no org
+-- filter itself - a project's team can include people from other orgs, and
+-- that's real, intended cross-org collaboration data, not a leak). Without
+-- the second condition, a project's own member list (v_project_member)
+-- would show userIds for cross-org teammates that this view then couldn't
+-- resolve into a name/job title - visible as a project member, but silently
+-- anonymous, for no reason tied to an actual permission boundary.
+CREATE OR REPLACE VIEW ai.v_staff_directory AS
+SELECT DISTINCT st."userId", u."fullName", u."organisationSlug", st."jobTitle", st."departmentId", st."positionId"
+FROM public."Staff" st
+JOIN public."User" u ON u.id = st."userId"
+WHERE u."organisationSlug" = current_setting('app.org_slug', true)
+   OR EXISTS (
+       SELECT 1 FROM ai.v_project_member pm WHERE pm."userId" = st."userId"
+   );
+
 CREATE OR REPLACE VIEW ai.v_staff AS
 -- salary/annualGrossSalary/taxNumber/pension* deliberately excluded - see
 -- schema note on Staff: compensation fields stay off the exploratory path
 -- regardless of who's asking (PDF guidance: keep payroll on the trusted
 -- GraySync-API path, not free-form SQL).
+-- hireDate/employmentStatus are more personal than the directory-level
+-- fields above (v_staff_directory) - stay gated to own record or manager/admin.
 SELECT st."userId", u."fullName", u."organisationSlug", st."jobTitle", st."employmentStatus",
        st."hireDate", st."departmentId", st."positionId"
 FROM public."Staff" st
@@ -531,11 +567,11 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ai_readonly')
 ALTER ROLE ai_readonly SET statement_timeout = '5s';
 GRANT USAGE ON SCHEMA ai TO ai_readonly;
 GRANT SELECT ON
-    ai.v_project, ai.v_task, ai.v_task_assignee, ai.v_task_activity, ai.v_scope,
+    ai.v_project, ai.v_project_member, ai.v_task, ai.v_task_assignee, ai.v_task_activity, ai.v_scope,
     ai.v_invoice, ai.v_invoice_item, ai.v_expense, ai.v_quote, ai.v_budget, ai.v_rate_card,
     ai.v_announcement, ai.v_announcement_comment, ai.v_contact, ai.v_company_contact,
     ai.v_department, ai.v_position, ai.v_skill,
-    ai.v_staff, ai.v_user_skill, ai.v_leave_request, ai.v_leave_policy, ai.v_staff_leave_balance,
+    ai.v_staff_directory, ai.v_staff, ai.v_user_skill, ai.v_leave_request, ai.v_leave_policy, ai.v_staff_leave_balance,
     ai.v_feedback, ai.v_feedback_submission, ai.v_staff_note, ai.v_goal, ai.v_objective
     TO ai_readonly;
 -- ai_readonly can execute the SECURITY-definer-free helper functions above

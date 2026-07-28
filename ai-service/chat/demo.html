@@ -1,0 +1,673 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GraySync Assistant — Demo</title>
+<style>
+  :root {
+    --bg-canvas: #eef0ee;
+    --bg-panel: #f7f8f7;
+    --bg-sidebar: #f2f3f1;
+    --border: #dcdfda;
+    --text-primary: #1c1e1b;
+    --text-muted: #6b6f68;
+    --accent: #c9e94a;
+    --accent-text: #1c1e1b;
+    --bubble-assistant: #ffffff;
+    --bubble-assistant-text: #1c1e1b;
+    --input-bg: #e7e9e5;
+    --shadow: 0 1px 2px rgba(20, 22, 18, 0.06);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg-canvas);
+    color: var(--text-primary);
+    display: flex;
+    overflow: hidden;
+  }
+
+  /* ---------- sidebar ---------- */
+
+  .sidebar {
+    width: 280px;
+    min-width: 220px;
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+
+  .sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 20px 12px;
+  }
+
+  .sidebar-header h1 {
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+
+  .sidebar-header button {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 1.1rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .sidebar-header button:hover { background: var(--bg-panel); }
+
+  .conversations {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 10px 10px;
+  }
+
+  .conv-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 10px;
+    border-radius: 10px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    margin-bottom: 2px;
+  }
+  .conv-item:hover { background: var(--bg-panel); }
+  .conv-item.active {
+    background: var(--bg-panel);
+    border-color: var(--border);
+    box-shadow: var(--shadow);
+  }
+
+  .conv-avatar {
+    width: 34px;
+    height: 34px;
+    min-width: 34px;
+    border-radius: 9px;
+    background: var(--accent);
+    color: var(--accent-text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+  }
+
+  .conv-text { min-width: 0; }
+  .conv-title {
+    font-size: 0.88rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .conv-preview {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .identity-box {
+    border-top: 1px solid var(--border);
+    padding: 14px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .identity-box label {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  .identity-row { display: flex; gap: 6px; }
+  .identity-box input {
+    width: 100%;
+    font-size: 0.8rem;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    font-family: inherit;
+  }
+
+  /* ---------- main panel ---------- */
+
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    background: var(--bg-panel);
+  }
+
+  .main-header {
+    padding: 18px 28px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-canvas);
+  }
+  .main-header h2 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+  }
+  .main-header .sub {
+    margin-top: 2px;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+  }
+
+  .thread {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .empty-state {
+    margin: auto;
+  }
+
+  .date-divider {
+    align-self: center;
+    background: var(--bg-canvas);
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: 999px;
+    margin: 14px 0;
+  }
+
+  .msg-row {
+    display: flex;
+    flex-direction: column;
+    max-width: 68%;
+    margin-bottom: 14px;
+  }
+  .msg-row.user { align-self: flex-end; align-items: flex-end; }
+  .msg-row.assistant { align-self: flex-start; align-items: flex-start; }
+
+  .bubble {
+    padding: 10px 14px;
+    border-radius: 14px;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .msg-row.user .bubble {
+    background: var(--accent);
+    color: var(--accent-text);
+    border-bottom-right-radius: 4px;
+  }
+  .msg-row.assistant .bubble {
+    background: var(--bubble-assistant);
+    color: var(--bubble-assistant-text);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+    box-shadow: var(--shadow);
+  }
+
+  .msg-time {
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    margin-top: 4px;
+    padding: 0 4px;
+  }
+
+  .plan-trace {
+    max-width: 68%;
+    align-self: flex-start;
+    margin: -6px 0 14px 2px;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+  }
+  .plan-trace summary {
+    cursor: pointer;
+    user-select: none;
+  }
+  .plan-trace summary:hover { color: var(--text-primary); }
+  .plan-step {
+    margin-top: 6px;
+    padding: 8px 10px;
+    background: var(--bg-canvas);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .plan-step .tool-name {
+    font-weight: 700;
+    color: var(--text-primary);
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 0.7rem;
+  }
+
+  .typing {
+    display: inline-flex;
+    gap: 4px;
+    padding: 4px 2px;
+  }
+  .typing span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    animation: bounce 1.2s infinite ease-in-out;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.15s; }
+  .typing span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+    30% { transform: translateY(-4px); opacity: 1; }
+  }
+
+  .composer {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 28px 20px;
+    background: var(--bg-panel);
+  }
+  .composer-icons {
+    display: flex;
+    gap: 6px;
+    color: var(--text-muted);
+  }
+  .composer-icons button {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+  }
+  .composer-icons button:hover { background: var(--input-bg); }
+
+  .composer input[type="text"] {
+    flex: 1;
+    border: none;
+    background: var(--input-bg);
+    border-radius: 999px;
+    padding: 12px 18px;
+    font-size: 0.9rem;
+    font-family: inherit;
+    color: var(--text-primary);
+    outline: none;
+  }
+  .composer input[type="text"]:focus {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  .composer input[type="text"]::placeholder { color: var(--text-muted); }
+
+  .send-btn {
+    width: 42px;
+    height: 42px;
+    min-width: 42px;
+    border-radius: 50%;
+    border: none;
+    background: var(--accent);
+    color: var(--accent-text);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+  }
+  .send-btn:disabled { opacity: 0.5; cursor: default; }
+  .send-btn:not(:disabled):hover { filter: brightness(0.95); }
+
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h1>Assistant</h1>
+    <button id="new-conv-btn" title="New conversation">+</button>
+  </div>
+
+  <div class="conversations" id="conversations"></div>
+
+  <div class="identity-box">
+    <label>Demo identity</label>
+    <div class="identity-row">
+      <input id="org-input" type="text" value="endspace-mena" placeholder="organisationSlug" />
+    </div>
+    <div class="identity-row">
+      <input id="user-input" type="text" value="6" placeholder="userId" />
+    </div>
+  </div>
+</aside>
+
+<main class="main">
+  <div class="main-header">
+    <h2 id="conv-title">New conversation</h2>
+    <div class="sub" id="conv-sub">Ask about projects, tasks, invoices, leave, or documents</div>
+  </div>
+
+  <div class="thread" id="thread">
+    <div class="empty-state" id="empty-state"></div>
+  </div>
+
+  <form class="composer" id="composer">
+    <div class="composer-icons">
+      <button type="button" title="Attach" disabled>📎</button>
+      <button type="button" title="Voice" disabled>🎙️</button>
+    </div>
+    <input type="text" id="msg-input" placeholder="Write a message…" autocomplete="off" />
+    <button type="submit" class="send-btn" id="send-btn" title="Send">➤</button>
+  </form>
+</main>
+
+<script>
+(function () {
+  const API_BASE = "";
+
+  const state = {
+    conversationId: null,
+    conversations: [], // {id, title, preview}
+  };
+
+  const els = {
+    thread: document.getElementById("thread"),
+    emptyState: document.getElementById("empty-state"),
+    composer: document.getElementById("composer"),
+    msgInput: document.getElementById("msg-input"),
+    sendBtn: document.getElementById("send-btn"),
+    convTitle: document.getElementById("conv-title"),
+    convSub: document.getElementById("conv-sub"),
+    conversations: document.getElementById("conversations"),
+    newConvBtn: document.getElementById("new-conv-btn"),
+    orgInput: document.getElementById("org-input"),
+    userInput: document.getElementById("user-input"),
+  };
+
+  function identity() {
+    return {
+      organisationSlug: els.orgInput.value.trim() || "endspace-mena",
+      userId: parseInt(els.userInput.value.trim(), 10) || 0,
+    };
+  }
+
+  function formatTime(iso) {
+    const d = new Date(iso);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function clearThread() {
+    els.thread.innerHTML = "";
+  }
+
+  function showEmptyState() {
+    clearThread();
+    els.thread.appendChild(els.emptyState);
+  }
+
+  function scrollToBottom() {
+    els.thread.scrollTop = els.thread.scrollHeight;
+  }
+
+  function appendDateDivider(label) {
+    const el = document.createElement("div");
+    el.className = "date-divider";
+    el.textContent = label;
+    els.thread.appendChild(el);
+  }
+
+  function appendMessage(role, content, createdAt) {
+    if (els.thread.contains(els.emptyState)) els.thread.removeChild(els.emptyState);
+
+    const row = document.createElement("div");
+    row.className = "msg-row " + role;
+
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.textContent = content;
+    row.appendChild(bubble);
+
+    if (createdAt) {
+      const time = document.createElement("div");
+      time.className = "msg-time";
+      time.textContent = formatTime(createdAt);
+      row.appendChild(time);
+    }
+
+    els.thread.appendChild(row);
+    return row;
+  }
+
+  function appendTypingIndicator() {
+    const row = document.createElement("div");
+    row.className = "msg-row assistant";
+    row.id = "typing-row";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
+    row.appendChild(bubble);
+    els.thread.appendChild(row);
+    scrollToBottom();
+    return row;
+  }
+
+  function removeTypingIndicator() {
+    const row = document.getElementById("typing-row");
+    if (row) row.remove();
+  }
+
+  function appendPlanTrace(steps) {
+    if (!steps || !steps.length) return;
+    const details = document.createElement("details");
+    details.className = "plan-trace";
+    const summary = document.createElement("summary");
+    summary.textContent = `Used ${steps.length} tool${steps.length > 1 ? "s" : ""} to answer`;
+    details.appendChild(summary);
+    steps.forEach((s) => {
+      const div = document.createElement("div");
+      div.className = "plan-step";
+      div.innerHTML = `<span class="tool-name">${s.tool}</span><br>${s.rationale || ""}`;
+      details.appendChild(div);
+    });
+    els.thread.appendChild(details);
+  }
+
+  function refreshSidebar() {
+    els.conversations.innerHTML = "";
+    state.conversations.forEach((c) => {
+      const item = document.createElement("div");
+      item.className = "conv-item" + (c.id === state.conversationId ? " active" : "");
+      item.innerHTML = `
+        <div class="conv-avatar">${(c.title || "?").slice(0, 1).toUpperCase()}</div>
+        <div class="conv-text">
+          <div class="conv-title">${c.title}</div>
+          <div class="conv-preview">${c.preview || ""}</div>
+        </div>`;
+      item.addEventListener("click", () => loadConversation(c.id));
+      els.conversations.appendChild(item);
+    });
+  }
+
+  function upsertSidebarEntry(id, title, preview) {
+    const existing = state.conversations.find((c) => c.id === id);
+    if (existing) {
+      existing.title = title;
+      existing.preview = preview;
+    } else {
+      state.conversations.unshift({ id, title, preview });
+    }
+    refreshSidebar();
+  }
+
+  async function loadConversation(id) {
+    const { organisationSlug, userId } = identity();
+    state.conversationId = id;
+    els.convTitle.textContent = "Conversation #" + id;
+    els.convSub.textContent = organisationSlug + " · user " + userId;
+    refreshSidebar();
+
+    const res = await fetch(
+      `${API_BASE}/chat/${id}?organisationSlug=${encodeURIComponent(organisationSlug)}&userId=${userId}`
+    );
+    clearThread();
+    if (!res.ok) {
+      showEmptyState();
+      return;
+    }
+    const data = await res.json();
+    if (!data.messages.length) {
+      showEmptyState();
+      return;
+    }
+    let lastDate = null;
+    data.messages.forEach((m) => {
+      const d = new Date(m.createdAt).toDateString();
+      if (d !== lastDate) {
+        appendDateDivider(new Date(m.createdAt).toLocaleDateString(undefined, {
+          weekday: "long", month: "short", day: "numeric",
+        }));
+        lastDate = d;
+      }
+      appendMessage(m.role, m.content, m.createdAt);
+    });
+    scrollToBottom();
+  }
+
+  function startNewConversation() {
+    state.conversationId = null;
+    els.convTitle.textContent = "New conversation";
+    els.convSub.textContent = "Ask about projects, tasks, invoices, leave, or documents";
+    refreshSidebar();
+    showEmptyState();
+    els.msgInput.focus();
+  }
+
+  async function sendMessage(text) {
+    const { organisationSlug, userId } = identity();
+
+    appendMessage("user", text, new Date().toISOString());
+    scrollToBottom();
+
+    const typingRow = appendTypingIndicator();
+
+    let assistantText = "";
+    let planSteps = [];
+    let newConversationId = state.conversationId;
+
+    try {
+      const res = await fetch(`${API_BASE}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          organisationSlug,
+          userId,
+          conversationId: state.conversationId,
+          message: text,
+        }),
+      });
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const events = buffer.split("\n\n");
+        buffer = events.pop();
+
+        for (const raw of events) {
+          const lines = raw.split("\n");
+          const eventLine = lines.find((l) => l.startsWith("event:"));
+          const dataLine = lines.find((l) => l.startsWith("data:"));
+          if (!eventLine || !dataLine) continue;
+          const eventName = eventLine.replace("event:", "").trim();
+          const data = JSON.parse(dataLine.replace("data:", "").trim());
+
+          if (eventName === "conversation") {
+            newConversationId = data.conversationId;
+          } else if (eventName === "message") {
+            assistantText = data.content;
+          } else if (eventName === "error") {
+            assistantText = assistantText || "Sorry, something went wrong answering that.";
+          }
+        }
+      }
+    } catch (err) {
+      assistantText = "Could not reach the assistant service.";
+    }
+
+    removeTypingIndicator();
+
+    const wasNew = state.conversationId === null;
+    state.conversationId = newConversationId;
+
+    appendMessage("assistant", assistantText || "(no response)", new Date().toISOString());
+    appendPlanTrace(planSteps);
+    scrollToBottom();
+
+    if (state.conversationId) {
+      const title = "Conversation #" + state.conversationId;
+      upsertSidebarEntry(state.conversationId, title, text.slice(0, 40));
+      if (wasNew) {
+        els.convTitle.textContent = title;
+        els.convSub.textContent = organisationSlug + " · user " + userId;
+      }
+    }
+  }
+
+  els.composer.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = els.msgInput.value.trim();
+    if (!text) return;
+    els.msgInput.value = "";
+    els.sendBtn.disabled = true;
+    try {
+      await sendMessage(text);
+    } finally {
+      els.sendBtn.disabled = false;
+      els.msgInput.focus();
+    }
+  });
+
+  els.newConvBtn.addEventListener("click", startNewConversation);
+
+  showEmptyState();
+})();
+</script>
+
+</body>
+</html>

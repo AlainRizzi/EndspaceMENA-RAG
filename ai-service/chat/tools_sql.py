@@ -8,6 +8,9 @@ to what they're allowed to see - never add your own organisationSlug/userId
 filters, they're applied automatically):
 
 v_project(id, slug, name, organisationSlug, customId, description, status, priority, type, dueDate, startDate, managerId, companyId, createdAt, updatedAt)
+v_project_member(projectSlug, userId) - userId here may belong to a
+  different organisation than the caller's; that's real cross-org
+  collaboration data, not a leak.
 v_task(id, name, description, projectSlug, status, ownerId, startDate, dueDate, estimated, logged, taskType, flagged, isDeleted, createdAt, updatedAt)
 v_task_assignee(id, taskId, projectSlug, assigneeId, estimatedTime, createdAt)
 v_task_activity(id, taskId, taskName, projectSlug, createdAt)
@@ -25,6 +28,7 @@ v_company_contact(id, customId, email, companyType, status, name)
 v_department(id, name, organisationSlug)
 v_position(id, name, departmentId, organisationSlug)
 v_skill(id, name, organisationSlug)
+v_staff_directory(userId, fullName, organisationSlug, jobTitle, departmentId, positionId)
 v_staff(userId, fullName, organisationSlug, jobTitle, employmentStatus, hireDate, departmentId, positionId)
 v_user_skill(id, userId, skillId, organisationSlug)
 v_leave_request(id, requestorId, managerId, leaveStartDate, leaveEndDate, status, leavePolicyId, requestedDuration, durationUnit, createdAt, organisationSlug)
@@ -63,6 +67,16 @@ an exact fixed set for it.
 Notes:
 - v_staff intentionally has no salary/compensation columns - never claim or
   compute one; if asked, say that data isn't available through this tool.
+- To resolve a userId into a name (e.g. listing who's on a project/team),
+  use v_staff_directory, not v_staff - v_staff is scoped to the caller's own
+  record (or anyone's if a manager/admin), so joining it to something like
+  v_project_member silently drops teammates the caller isn't otherwise
+  allowed to see as individuals, even though the roster itself is visible.
+- A count of who's on a project/team includes the caller if they're a member.
+  A NAMED list of "my teammates"/"who else is on this" excludes the caller
+  themselves if they're a member (they already know they're on it) - but if
+  the caller is not a member of the project at all, a named list includes
+  everyone, since there's no "themselves" to exclude.
 - Values that aren't stored directly (totals, remainders, balances, counts,
   averages, etc.) should be computed in SQL by joining/aggregating the
   relevant views. Work out which views apply to each specific question rather
@@ -72,11 +86,29 @@ Notes:
   everyone has an opening balance or has made a request) - that means "zero",
   not "no data", so anchor queries involving these on whichever view is
   guaranteed to have the rows you need, and join outward from there.
+- A staff member's remaining leave for a policy is
+  v_leave_policy.entitlement + v_staff_leave_balance.openingBalance -
+  (sum of their APPROVED v_leave_request.requestedDuration for that policy).
+  entitlement is required in this sum - it is not optional or a fallback.
+- Always include an entity's slug/id column alongside its name when selecting
+  it (e.g. v_project.slug with v_project.name) - the answer may be used to
+  identify that same entity again in a later question.
+- v_staff.fullName holds a full name, not just a first or last name - a name
+  filter must use a wildcard partial match against it, not exact equality.
 """
 
 
 class TextToSqlError(Exception):
     pass
+
+
+class QueryNotPermittedError(TextToSqlError):
+    """Raised specifically when the query inspector rejected the generated
+    SQL for touching something outside the allowed views/columns (see
+    sql_guard.UnsafeQueryError) - distinct from every other failure (a bad
+    join, a timeout, a retry that still didn't work), which means "something
+    went wrong," not "you're not allowed to see that."
+    """
 
 
 async def generate_sql(question: str, user_id: int | None, retry_error: str | None = None) -> str:
@@ -165,12 +197,14 @@ async def run_text_to_sql(question: str, org_slug: str, user_id: int | None) -> 
     try:
         return await _validate_and_run(raw_sql, org_slug, user_id)
     except UnsafeQueryError as e:
-        raise TextToSqlError(f"generated query rejected: {e}") from e
+        # Not retried - the model reaching for a disallowed table/column
+        # isn't a syntax mistake a retry would fix, it's the fence working.
+        raise QueryNotPermittedError(str(e)) from e
     except Exception as e:
         retry_sql = await generate_sql(question, user_id, retry_error=str(e))
         try:
             return await _validate_and_run(retry_sql, org_slug, user_id)
         except UnsafeQueryError as retry_e:
-            raise TextToSqlError(f"generated query rejected: {retry_e}") from retry_e
+            raise QueryNotPermittedError(str(retry_e)) from retry_e
         except Exception as retry_e:
             raise TextToSqlError(f"query failed after retry: {retry_e}") from retry_e

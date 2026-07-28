@@ -91,6 +91,35 @@ curl.exe http://127.0.0.1:8000/ai/jobs/<jobId>
 ```
 Repeat until `"status": "COMPLETED"`.
 
+### Chatbot (`/chat`)
+
+Easiest way to try it: open **http://127.0.0.1:8000/chat-demo** in a browser — a
+self-contained demo page (`chat/demo.html`, not the real GraySync frontend) with an
+`organisationSlug`/`userId` picker in the sidebar, streaming replies, and a collapsible
+trace of which tools each answer used. Only requires the API server (Terminal 1) — no
+worker needed, `/chat` is synchronous/streamed, not queued.
+
+To test the raw API instead:
+
+**1. Ask a question (streams back over SSE):**
+```powershell
+curl.exe -N -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d "{\"organisationSlug\": \"endspace-mena\", \"userId\": 6, \"message\": \"What is the status of project yeni-gate?\"}"
+```
+The first event carries the `conversationId` — reuse it in `conversationId` on the next
+call to continue that same conversation (the agent sees recent history and can resolve
+follow-ups like "has it been invoiced?").
+
+**2. Fetch a conversation's full history:**
+```powershell
+curl.exe "http://127.0.0.1:8000/chat/<conversationId>?organisationSlug=endspace-mena&userId=6"
+```
+
+`userId` here is a real `User.id` from the `graysync` DB, not a slug — pick one with
+`SELECT id, "fullName", "isProjectManager", "isSuperAdmin" FROM "User" WHERE "organisationSlug" = 'endspace-mena'`.
+Try both a regular staff `userId` and a manager/admin one on the same question (e.g. "how
+many leave days do I have left") to see the ownership-scoped views in `schema.sql` behave
+differently — see `ai_readonly` role notes there.
+
 ## Ingesting RAG data
 
 Populates `RagSource`/`RagChunk` from `graysync` Postgres + S3 documents. Safe to re-run —

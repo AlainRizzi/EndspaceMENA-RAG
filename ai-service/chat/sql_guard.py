@@ -5,11 +5,11 @@ from sqlglot import exp
 # has SELECT on (schema.sql). Unqualified names are assumed to mean ai.*,
 # since ai_readonly's search_path is ai, public and every view lives in ai.
 ALLOWED_VIEWS = {
-    "v_project", "v_task", "v_task_assignee", "v_task_activity", "v_scope",
+    "v_project", "v_project_member", "v_task", "v_task_assignee", "v_task_activity", "v_scope",
     "v_invoice", "v_invoice_item", "v_expense", "v_quote", "v_budget", "v_rate_card",
     "v_announcement", "v_announcement_comment", "v_contact", "v_company_contact",
     "v_department", "v_position", "v_skill",
-    "v_staff", "v_user_skill", "v_leave_request", "v_leave_policy", "v_staff_leave_balance",
+    "v_staff_directory", "v_staff", "v_user_skill", "v_leave_request", "v_leave_policy", "v_staff_leave_balance",
     "v_feedback", "v_feedback_submission", "v_staff_note", "v_goal", "v_objective",
 }
 
