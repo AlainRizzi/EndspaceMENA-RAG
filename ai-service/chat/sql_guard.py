@@ -9,6 +9,7 @@ ALLOWED_VIEWS = {
     "v_invoice", "v_invoice_item", "v_expense", "v_quote", "v_budget", "v_budget_data", "v_rate_card",
     "v_time_entry", "v_project_member_rate", "v_project_budget",
     "v_supplier", "v_scope_service", "v_retainer_period", "v_resourcing", "v_customer",
+    "v_media_plan", "v_notification",
     "v_rag_source",
     "v_announcement", "v_announcement_comment", "v_contact", "v_company_contact",
     "v_department", "v_position", "v_skill",
@@ -60,6 +61,13 @@ _MIXED_CASE_COLUMNS = {
     # v_rag_source (sourceType, ingestedAt, fileType) - projectSlug/status
     # already covered above via other views.
     "sourceType", "ingestedAt", "fileType",
+    # v_media_plan (organisationSlug/projectSlug/customId/companyId/wonAt/
+    # startDate/createdAt/updatedAt already covered above via other views)
+    "budgetTimeline", "totalBudget", "lostAt", "lostReason", "isCompleted",
+    "contactPersonName", "contactPersonEmail",
+    # v_notification (taskId/projectSlug/scopeSlug/invoiceId/expenseId/
+    # leaveRequestId/feedbackId/goalId/createdAt already covered above)
+    "isRead",
 }
 _MIXED_CASE_COLUMNS_LOWER = {c.lower(): c for c in _MIXED_CASE_COLUMNS}
 

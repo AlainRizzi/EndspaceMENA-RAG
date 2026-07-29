@@ -30,6 +30,10 @@ VIEW_ENTITY_FAMILIES: dict[str, list[str]] = {
     "v_task_assignee": ["PROJECT", "PROJECT_VIEW_OTHERS", "PROJECT_MODIFY_MEMBER"],
     "v_task_activity": ["PROJECT_LOG"],
     "v_scope": ["SCOPE", "SCOPE_VIEW_ALL", "SCOPE_VIEW_LINKED", "SCOPE_VIEW_MEMBER"],
+    # No dedicated MEDIA_PLAN ability exists in the real catalog - gated on
+    # the same SCOPE family as v_scope itself (see schema.sql's v_media_plan
+    # comment for why).
+    "v_media_plan": ["SCOPE", "SCOPE_VIEW_ALL", "SCOPE_VIEW_LINKED", "SCOPE_VIEW_MEMBER"],
     "v_invoice": ["INVOICE_VIEW_ALL", "INVOICE_VIEW_PROJECT_LINKED", "INVOICE"],
     "v_invoice_item": ["INVOICE_VIEW_ALL", "INVOICE_VIEW_PROJECT_LINKED", "INVOICE"],
     "v_expense": ["EXPENSE_READ_ALL_LIST", "EXPENSE_VIEW_PROJECT_LINKED", "EXPENSE"],
@@ -86,6 +90,13 @@ VIEW_ENTITY_FAMILIES: dict[str, list[str]] = {
     # "can the caller see this view at all" for a query that might touch any
     # mix of the 7 branches - the view's own per-branch WHERE clauses are
     # the real (and only) enforcement here, same as v_goal's fallthrough.
+    #
+    # v_notification is absent too - own-record only (receiverId = self,
+    # unconditionally, no ability check and no PEOPLE_INTERNAL-style
+    # override at all - see schema.sql), so there is no ability to check in
+    # the first place, and a caller can never legitimately be "denied" this
+    # view - whatever rows come back (their own, possibly zero) are always
+    # correct, same fallthrough shape as v_goal/v_staff_note.
 }
 
 

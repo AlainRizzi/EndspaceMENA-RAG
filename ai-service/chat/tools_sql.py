@@ -114,6 +114,28 @@ v_scope(id, name, slug, customId, projectSlug, organisationSlug, status, type, d
   closeProbability are pre-close forecast figures for a not-yet-won scope;
   forecastRevenue = estDeal * closeProbability. wonAt is set once the scope
   is actually won (status = 'WON').
+v_media_plan(id, slug, name, customId, organisationSlug, projectSlug, companyId, contactPersonName, contactPersonEmail, status, budgetTimeline, startDate, endDate, totalBudget, wonAt, lostAt, lostReason, isCompleted, createdAt, updatedAt, currency)
+  - A MediaPlan is a DIFFERENT entity from v_scope - "pipeline"/"deal"
+  questions mean v_scope, NOT this. Only use v_media_plan for a question
+  that explicitly says "media plan(s)". status uses the same vocabulary as
+  v_scope (ACTIVE/WON/LOST) but they are separate tables - never combine or
+  sum counts/totals across v_scope and v_media_plan as if they were one
+  thing. projectSlug can be NULL (a media plan not yet linked to a
+  project) - still a real, current row, do not exclude NULL-projectSlug
+  rows when counting/listing.
+  contactPersonName/contactPersonEmail vs companyId are DIFFERENT things -
+  contactPersonName/contactPersonEmail are the actual PERSON's name/email
+  (e.g. "Megan Skippen" / "megan.skippen@yopmail.com"); companyId resolves
+  (via v_company_contact.id -> name/email) to the COMPANY's name/email
+  (e.g. "Abadeen"). "who is the contact"/"contact name"/"contact email"
+  ALWAYS means contactPersonName/contactPersonEmail - NEVER join to
+  v_company_contact for a "contact" question, even though both are real
+  data about the media plan (confirmed live: this previously produced a
+  wrong, misattributed email - a person's real email and their media
+  plan's company's email are different addresses, and presenting the
+  company one as the person's is a real factual error, not a defensible
+  substitution). Only use companyId/v_company_contact if the question
+  explicitly asks about the company, not the (person) contact.
 v_invoice(id, customId, organisationSlug, companyId, projectSlug, scopeSlug, type, issueDate, dueDate, amountPaid, paidAt, paymentStatus, balance, currency, billToFinancialDetailId)
 v_invoice_item(id, invoiceId, description, quantity, unitPrice, discount, amount, currency)
 v_expense(id, customId, organisationSlug, projectSlug, purchaserId, purchaseDate, dueDate, cost, billed, profit, action, currency, supplierId, markup, markupType, totalPaid, balance, status)

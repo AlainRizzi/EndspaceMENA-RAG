@@ -723,6 +723,55 @@ WHERE (
   AND (sc."projectSlug" IS NULL OR sc."projectSlug" IN (SELECT * FROM ai.visible_project_slugs()))
   AND NOT sc."isDeleted";
 
+-- MediaPlan was previously not exposed at all (confirmed live: "how many
+-- media plans are active" always answered "I don't have enough
+-- information", not because of a permission gate but because no view for
+-- it existed) - real, populated table (13 rows, 7 not deleted), distinct
+-- from v_scope/pipelines (different table, confirmed live: "pipeline"
+-- questions already resolve to v_scope, never MediaPlan).
+-- No dedicated MEDIA_PLAN ability exists in the real catalog (checked
+-- live against Ability - nothing ILIKE '%MEDIA%'). MediaPlan is the same
+-- kind of org/company-scoped sales-pipeline object as Scope (status,
+-- stageId/kanbanOrder, wonAt/lostAt) with no more specific ability of its
+-- own, so gated on the same SCOPE family as v_scope above as the closest
+-- reasonable fallback rather than inventing a new ability check with no
+-- catalog backing - flagged here in case a real MEDIA_PLAN ability is
+-- added to the catalog later, which should replace this.
+-- contactPersonName added (was missing - confirmed live this caused a real
+-- wrong answer: "who are the contact names" had no real contact-person data
+-- to draw from, so the LLM substituted the resolved companyId name instead
+-- (via v_company_contact's own id->Contact.name join pattern) and presented
+-- a company name as if it were a person's name. contactPersonName is a
+-- plain denormalized text column already on MediaPlan.
+-- contactPersonEmail (joined from ContactPerson via contactPersonId) added
+-- for the same reason, found via the same live failure mode one level
+-- deeper: with no real contact-person email exposed, "what are the contact
+-- emails" fell back to v_company_contact.email (the COMPANY's email, via
+-- companyId) and silently presented it as the person's email - confirmed
+-- live this was actively WRONG, not just a different-but-defensible
+-- substitution: for contactPersonId=11 (Vanessa Bagroski), her real email
+-- is vanessa@yopmail.com but the company (companyId=11)'s email is a
+-- completely different address (developmentaccounts@yopmail.com) - a case
+-- where the two coincidentally matching for a different row earlier made
+-- the bug look like it was working.
+CREATE OR REPLACE VIEW ai.v_media_plan AS
+SELECT mp.id, mp.slug, mp.name, mp."customId", mp."organisationSlug", mp."projectSlug",
+       mp."companyId", mp."contactPersonName", cp.email AS "contactPersonEmail",
+       mp.status, mp."budgetTimeline", mp."startDate", mp."endDate",
+       mp."totalBudget", mp."wonAt", mp."lostAt", mp."lostReason", mp."isCompleted",
+       mp."createdAt", mp."updatedAt",
+       ai.org_currency_symbol(mp."organisationSlug") AS currency
+FROM public."MediaPlan" mp
+LEFT JOIN public."ContactPerson" cp ON cp.id = mp."contactPersonId"
+WHERE (
+    ai.session_has_read_ability('SCOPE')
+    OR ai.session_has_read_ability('SCOPE_VIEW_ALL')
+    OR ai.session_has_read_ability('SCOPE_VIEW_LINKED')
+    OR ai.session_has_read_ability('SCOPE_VIEW_MEMBER')
+  )
+  AND (mp."projectSlug" IS NULL OR mp."projectSlug" IN (SELECT * FROM ai.visible_project_slugs()))
+  AND NOT mp."isDeleted";
+
 -- ---- Finance entities (project-scoped; amounts only, no bank/payment details) ----
 
 CREATE OR REPLACE VIEW ai.v_invoice AS
@@ -1265,6 +1314,27 @@ FROM public."StaffNote" sn
 JOIN public."User" u ON u.id = sn."userId"
 WHERE sn."userId" = ai.session_user_id() OR ai.session_has_read_ability('PEOPLE_RELATED');
 
+-- Notification was previously not exposed at all (confirmed live: "latest
+-- notification" had no real data path - search_knowledge_base reached for
+-- semantically-similar task-activity/comment content from RAG instead and
+-- presented it as if it were a real notification, which it structurally is
+-- not - Notification/OrganisationNotification/UserNotification are real,
+-- separate tables never touched by that search). Real, populated table
+-- (1428 rows: RoleChanged, ScopeUpdated, TaskAssigned, ProjectCreated, etc.
+-- - confirmed live for a real user, e.g. Rony's actual latest notification
+-- is "Scope Updated" on 2026-07-14, nothing resembling task-activity RAG
+-- content). Strictly own-inbox data (receiverId) - no ability check, no
+-- PEOPLE_INTERNAL-style override, unlike v_staff_note above - there is no
+-- legitimate "view someone else's notification feed" case the way there is
+-- for staff notes/leave (a manager reviewing a report), so unlike every
+-- other own-record view in this schema this one is own-record ONLY.
+CREATE OR REPLACE VIEW ai.v_notification AS
+SELECT n.id, n.type, n.title, n.description, n."isRead", n."createdAt",
+       n."taskId", n."projectSlug", n."scopeSlug", n."invoiceId", n."expenseId",
+       n."leaveRequestId", n."feedbackId", n."goalId"
+FROM public."Notification" n
+WHERE n."receiverId" = ai.session_user_id();
+
 CREATE OR REPLACE VIEW ai.v_goal AS
 -- Goal/Objective have no catalog entity at all (not in defaults.json under
 -- any tab) - GraySync's real permission system doesn't cover this feature.
@@ -1303,6 +1373,7 @@ GRANT SELECT ON
     ai.v_invoice, ai.v_invoice_item, ai.v_expense, ai.v_quote, ai.v_budget, ai.v_budget_data, ai.v_rate_card,
     ai.v_time_entry, ai.v_project_member_rate, ai.v_project_budget,
     ai.v_supplier, ai.v_scope_service, ai.v_retainer_period, ai.v_resourcing, ai.v_customer,
+    ai.v_media_plan, ai.v_notification,
     ai.v_announcement, ai.v_announcement_comment, ai.v_contact, ai.v_company_contact,
     ai.v_department, ai.v_position, ai.v_skill,
     ai.v_staff_directory, ai.v_staff, ai.v_user_skill, ai.v_leave_request, ai.v_leave_policy, ai.v_staff_leave_balance,
@@ -1321,5 +1392,6 @@ GRANT SELECT ON public."Project", public."Task", public."TaskAssignee", public."
     public."OrganisationFinance", public."Currency",
     public."SupplierContact", public."ScopeService", public."ScopeSection", public."Service",
     public."RetainerBillingPeriod", public."Resourcing", public."ResourcingMonth", public."CompanyFinancialDetail",
-    public."Invoice", public."LeavePolicy"
+    public."Invoice", public."LeavePolicy", public."MediaPlan", public."ContactPerson",
+    public."Notification"
     TO ai_readonly;

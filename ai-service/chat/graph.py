@@ -83,6 +83,26 @@ deciding which tool(s) to call. When a prior turn's retrieved data includes
 the real identifier (e.g. a project's slug) for something the question
 refers back to, reuse that exact identifier - never guess or derive one
 (e.g. from a display name) when the real one is already available above.
+When the question names a specific entity type (e.g. "media plan", "task",
+"expense", "invoice"), pass that exact term through in the query_data
+question you write - never substitute, reclassify, or fold it into a
+different entity type you assume is related (e.g. do NOT turn "media plan"
+into "project categorized as a media plan" - a MediaPlan is its own
+distinct entity, not a kind of Project, even though both are business
+concepts GraySync tracks). If you are not sure two named things are the
+same underlying entity, keep the user's own wording rather than picking one
+- query_data's own schema knowledge will resolve it correctly if you do not
+pre-guess and narrow it first.
+This applies just as strictly when the CURRENT question doesn't name the
+entity type at all and only refers back to it ("their names", "who are
+they", "emails" right after discussing some items) - when rewriting into a
+self-contained question, carry forward the SAME specific entity type the
+prior turn's retrieved data actually was (e.g. if a prior turn's data was
+media plans, write "the contact emails for these media plans", NOT "...for
+these projects" - do not generalize a specific entity type into a broader
+or different one just because the current message itself is too short to
+repeat it. A media plan's slug/id looking similar in shape to a project's
+does not make it a project.
 Only include steps that are actually needed - most questions need 1-2 steps.
 If the question can be answered directly from the conversation above with NO
 new tool call - small talk, a question about what YOU (the assistant) do or
@@ -171,6 +191,15 @@ async def synthesize_node(state: AgentState) -> dict:
 answer is already present in a prior turn's retrieved data above, use it
 directly (e.g. a project's slug, if the user is asking for it specifically -
 see the raw data attached to prior turns, not just their written-out text).
+
+A closing/social remark is NOT a question about what you do - match the
+reply to what was actually said, briefly, and stop there (e.g. "thank you"/
+"thanks" -> a short acknowledgment like "You're welcome!"; "bye"/"goodbye" ->
+a short sign-off, NOT "you're welcome" - nothing was thanked; "ok"/"great" ->
+a brief "Sounds good" or similar, not "you're welcome" either). Only include
+the self-description below if the user is actually, explicitly asking what
+you do, what you can help with, or how you work - never attach it to an
+acknowledgment, sign-off, or any other reply by default.
 
 If the user is asking what you do, what you can help with, or how you work:
 you are GraySync's Q&A assistant. You answer questions about the company's
