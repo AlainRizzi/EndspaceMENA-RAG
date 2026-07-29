@@ -22,7 +22,27 @@ never state a bare number for money without its unit. If a question
 aggregates money across rows that could span more than one organisation
 (e.g. summed/compared across projects or orgs), and their currencies differ,
 say so explicitly rather than presenting one combined total as if it were a
-single currency:
+single currency.
+
+Any column ending in "Id" (managerId, companyId, requestorId, purchaserId,
+authorUserId, etc.) is a bare foreign-key reference, never a meaningful
+answer on its own - a userId-shaped one resolves to a name via
+v_staff_directory (join on userId), a companyId resolves via
+v_company_contact (join on id). If the question needs to know WHO or WHAT a
+foreign-key column points to (a manager, purchaser, author, company, ...),
+JOIN to resolve the real name - never select the bare id alone and never
+state the number itself as if it were an answer.
+
+The SAME rule applies to any column ending in "Slug" (projectSlug, scopeSlug,
+organisationSlug's exception noted separately above). A slug is an internal
+identifier, not a display name, even though it's often readable text - never
+select a bare *Slug column as the way to identify an entity in the answer
+unless the user explicitly asked for the slug/id itself. If the question is
+about which project/scope something belongs to, JOIN projectSlug to
+v_project.slug for v_project.name, or scopeSlug to v_scope.slug for
+v_scope.name, and use the real name in the answer - do not carry a raw
+*Slug column through to the final result just because it happened to be on
+the row you queried:
 
 v_project(id, slug, name, organisationSlug, customId, description, status, priority, type, dueDate, startDate, managerId, companyId, createdAt, updatedAt)
   - contains every project the caller is PERMITTED to view, which for a
@@ -31,10 +51,40 @@ v_project(id, slug, name, organisationSlug, customId, description, status, prior
   team membership, NOT everything a broad role happens to permit viewing -
   for that meaning, use v_project_member (below), not v_project, even though
   v_project would also return a (larger, wrong-for-this-question) result.
+  managerId/companyId are bare foreign-key ids, never meaningful on their
+  own - if the question needs the manager's or company's NAME (e.g. "who
+  manages this project", "give me this project's information"), JOIN
+  managerId to v_staff_directory.userId for the manager's fullName, and
+  companyId to v_company_contact.id for the company's name. Never select
+  managerId/companyId alone and never state the bare number as if it were
+  an answer.
 v_project_member(projectSlug, userId) - actual project team membership. Use
   this, not v_project, for any "my"/"I'm on"/"working on" project question.
   userId here may belong to a different organisation than the caller's;
   that's real cross-org collaboration data, not a leak.
+v_rag_source(id, sourceType, projectSlug, status, ingestedAt, name, fileType)
+  - THIS is the inventory of what's been ingested into the knowledge base -
+  use it for "what documents does project X have", "which documents are
+  ingested/searchable", "list PDFs for project X" style questions. There is
+  NO v_document/v_project_document/v_file view - do not invent one; this is
+  the only view for this. name is the real ingested item's name/title
+  (already resolved per sourceType - a project document's real filename, a
+  scope document's filename, "Activity on task: X" for a task's activity
+  log, an announcement's title, ...) - never confuse it with the enclosing
+  project's own name. Filenames themselves do NOT reliably include an
+  extension (confirmed live - a real invoice PDF was named just
+  "INV-BCG1005", no ".pdf") - never filter file type via name ILIKE
+  '%.pdf', use the fileType column instead. fileType is only populated for
+  PROJECT_DOCUMENT/SCOPE_DOCUMENT/MEDIA_PLAN_DOCUMENT (NULL for the other
+  sourceTypes, which have no underlying file) and its stored FORMAT is
+  inconsistent across those three - sometimes a short code ('pdf', 'img'),
+  sometimes a full MIME type ('application/pdf') - always use
+  fileType ILIKE '%pdf%' (or the relevant type), never exact equality.
+  sourceType is one of: PROJECT_DOCUMENT, SCOPE_DOCUMENT,
+  MEDIA_PLAN_DOCUMENT, ACTIVITY_LOG, ANNOUNCEMENT, ANNOUNCEMENT_COMMENT,
+  OBJECTIVE. This lists WHAT EXISTS, not document CONTENT - to search inside
+  a document's actual text, use the search_knowledge_base tool instead, not
+  this view.
 v_task(id, name, description, projectSlug, status, ownerId, startDate, dueDate, estimated, logged, taskType, flagged, isDeleted, createdAt, updatedAt)
   - ownerId is who the task actually belongs to in this data - "who has/owns
   this task", "my tasks", "tasks assigned to X" should filter on v_task.ownerId
@@ -118,13 +168,13 @@ v_leave_policy(id, name, entitlement, entitlementUnit, recurringPeriod, isPaid, 
   applicableAfter (in applicableAfterUnit, e.g. 12 MONTHS) - if not yet
   applicable, their remaining days for that policy is 0, not entitlement
   (confirmed live: a staff member hired under a year ago genuinely has 0
-  Annual Leave available where that policy requires 12 months). v_staff
-  hireDate is a timestamp, not a date - use
-  AGE(CURRENT_DATE, v_staff."hireDate"::date) and compare against
-  (applicableAfter || ' ' || applicableAfterUnit)::interval (e.g.
-  AGE(...) >= (lp."applicableAfter" || ' ' || lp."applicableAfterUnit")::interval),
-  never subtract a timestamp and compare the resulting interval to a bare
-  number - that raises "operator does not exist: interval >= integer".
+  Annual Leave available where that policy requires 12 months). To check
+  this, ALWAYS use the function ai.leave_policy_is_eligible(target_user_id,
+  policy_id) - e.g. WHERE ai.leave_policy_is_eligible(s."userId", lp.id) -
+  never write the AGE()/interval comparison inline yourself. This is
+  mandatory, not optional: a query that omits this eligibility check will
+  silently show an ineligible policy's full entitlement as if the person
+  already qualified for it.
   KNOWN GAP: allowCarryForward/accrualRate/maxAccrual/
   maxCarryForward are NOT factored into the remaining-leave formula below -
   a long-tenured staff member's real entitlement can exceed the flat
@@ -152,15 +202,22 @@ v_project_budget(projectSlug, budget_total_estimated, labour_cost_actual, expens
   Derive, don't expect stored: budget_remaining = budget_total_estimated -
   labour_cost_actual - expense_cost_actual; current_profit =
   contracted_revenue_total - labour_cost_actual - expense_cost_actual.
-  For "over/under budget" or "budget overrun" questions specifically:
+  For "over/under budget" or "budget overrun" questions SPECIFICALLY:
   budget_remaining being negative is only a real overrun when
   budget_total_estimated > 0 for that project - a project with
   budget_total_estimated = 0 will ALWAYS show as "negative remaining" purely
   because there's no recorded budget to compare against (see the data gap
-  above), not because it was actually exceeded. Always add
-  WHERE budget_total_estimated > 0 when answering an over/under-budget
-  question, so the comparison is only made among projects that actually have
-  a real budget figure to be over or under.
+  above), not because it was actually exceeded. Add
+  WHERE budget_total_estimated > 0 ONLY for this specific question shape, so
+  the comparison is only made among projects that actually have a real
+  budget figure to be over or under.
+  For "which project has the highest/lowest budget" or any other ranking/
+  lookup of budget_total_estimated itself: do NOT filter out
+  budget_total_estimated = 0 rows - if every project in scope has 0 (the
+  data gap above, environment-wide), the query must still return those rows
+  (e.g. ORDER BY budget_total_estimated DESC LIMIT 1, with no WHERE > 0) so
+  the answer can honestly say no project has a recorded budget yet, rather
+  than returning zero rows with no explanation of why.
 v_time_entry(id, taskId, memberId, scopeSlug, invoiceId, recordType, duration, cost, total, dayCreated, createdAt)
   - logged work time per task. memberId is the staff member who logged it
   (join to v_staff_directory for their name). duration is in seconds. No

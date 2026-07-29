@@ -41,8 +41,21 @@ async def _query_view(view_name: str, sql: str, user_id: int | None, *params) ->
 async def get_project(project_slug: str, user_id: int | None) -> dict | None:
     # slug is unique database-wide (confirmed: Project.slug has a unique
     # index, not scoped per-org), so no org filter is needed to disambiguate.
+    # managerId/companyId are resolved to real names here (not left as bare
+    # foreign-key ids) - confirmed live this was a real bug: a curated tool
+    # bypasses generate_sql's prompt entirely (its SQL is fixed, not
+    # LLM-drafted), so the "always resolve FK ids to names" rule added to
+    # tools_sql.py's schema description never applied to this path, and
+    # synthesize_node ended up stating "managed by user 2" as if a bare
+    # internal id were a real answer.
     rows = await _query_view(
-        "v_project", 'SELECT * FROM v_project WHERE slug = $1', user_id, project_slug
+        "v_project",
+        '''SELECT p.*, sd."fullName" AS "managerName", cc.name AS "companyName"
+           FROM v_project p
+           LEFT JOIN v_staff_directory sd ON sd."userId" = p."managerId"
+           LEFT JOIN v_company_contact cc ON cc.id = p."companyId"
+           WHERE p.slug = $1''',
+        user_id, project_slug,
     )
     return rows[0] if rows else None
 
@@ -73,11 +86,17 @@ async def list_my_leave_requests(user_id: int | None) -> list[dict]:
 
 
 async def search_knowledge_base(
-    query: str, org_slug: str, project_slug: str | None = None, top_k: int = 10
+    query: str, org_slug: str, user_id: int | None, project_slug: str | None = None, top_k: int = 10
 ) -> list[dict]:
     """RAG retrieval over ingested documents/activity/announcements (RagChunk).
-    Already org-scoped by retrieval_service.search itself.
+    Passing user_id makes retrieval_service.search ignore org_slug for
+    filtering and gate purely on the caller's real Ability/
+    visible_project_slugs() visibility instead (see that function's
+    docstring) - org_slug is kept as a parameter here only because it's
+    still meaningful for other, non-chat callers of retrieval_service.search
+    (e.g. capabilities/summarize_project.py, which has no per-user context
+    at all and still relies on the org-only path).
     """
     return await retrieval_service.search(
-        organisation_slug=org_slug, query=query, project_slug=project_slug, top_k=top_k
+        organisation_slug=org_slug, query=query, project_slug=project_slug, top_k=top_k, user_id=user_id
     )

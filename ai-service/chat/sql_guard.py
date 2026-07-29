@@ -9,6 +9,7 @@ ALLOWED_VIEWS = {
     "v_invoice", "v_invoice_item", "v_expense", "v_quote", "v_budget", "v_budget_data", "v_rate_card",
     "v_time_entry", "v_project_member_rate", "v_project_budget",
     "v_supplier", "v_scope_service", "v_retainer_period", "v_resourcing", "v_customer",
+    "v_rag_source",
     "v_announcement", "v_announcement_comment", "v_contact", "v_company_contact",
     "v_department", "v_position", "v_skill",
     "v_staff_directory", "v_staff", "v_user_skill", "v_leave_request", "v_leave_policy", "v_staff_leave_balance",
@@ -50,6 +51,15 @@ _MIXED_CASE_COLUMNS = {
     "totalCost", "totalAmount", "budgetedHours", "budgetedAmount", "usedHours",
     "incomeToDate", "periodName", "periodIndex", "futureResourcing", "markupType",
     "totalPaid",
+    # v_invoice.billToFinancialDetailId - the v_customer join column. Found
+    # missing here via a real production query failure (ai.audit_log id=291:
+    # "column i.billtofinancialdetailid does not exist" - the LLM wrote it
+    # unquoted and this safety net never force-quoted it because it wasn't
+    # registered, despite being documented in the schema description).
+    "billToFinancialDetailId",
+    # v_rag_source (sourceType, ingestedAt, fileType) - projectSlug/status
+    # already covered above via other views.
+    "sourceType", "ingestedAt", "fileType",
 }
 _MIXED_CASE_COLUMNS_LOWER = {c.lower(): c for c in _MIXED_CASE_COLUMNS}
 

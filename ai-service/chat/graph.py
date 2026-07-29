@@ -75,11 +75,15 @@ refers back to, reuse that exact identifier - never guess or derive one
 (e.g. from a display name) when the real one is already available above.
 Only include steps that are actually needed - most questions need 1-2 steps.
 If the question can be answered directly from the conversation above with NO
-new tool call - either small talk, or the exact fact/value asked for is
-already sitting in a prior turn's retrieved data (e.g. "slug?" right after a
-turn whose data included that project's slug) - return an EMPTY steps list
-rather than re-querying for something already known. Only plan a new tool
-call when the answer genuinely isn't in the data already shown above.
+new tool call - small talk, a question about what YOU (the assistant) do or
+can help with or how you work, or the exact fact/value asked for is already
+sitting in a prior turn's retrieved data (e.g. "slug?" right after a turn
+whose data included that project's slug) - return an EMPTY steps list rather
+than re-querying for something already known. A question about your own
+capabilities/purpose is never a data-retrieval question - never plan
+search_knowledge_base or any other tool for it, there is no ingested
+document about what you do. Only plan a new tool call when the answer
+genuinely requires looking up the company's actual data.
 Each step's args_json must be a JSON-encoded object matching that tool's args."""
 
     result, _usage = await llm_client.call_structured(prompt, Plan)
@@ -157,6 +161,18 @@ async def synthesize_node(state: AgentState) -> dict:
 answer is already present in a prior turn's retrieved data above, use it
 directly (e.g. a project's slug, if the user is asking for it specifically -
 see the raw data attached to prior turns, not just their written-out text).
+
+If the user is asking what you do, what you can help with, or how you work:
+you are GraySync's Q&A assistant. You answer questions about the company's
+real data - projects, tasks, invoices, expenses, budgets, leave, staff, and
+ingested documents/activity - by querying GraySync's own database, scoped to
+what the asking user is actually permitted to see. You cannot see anything
+outside GraySync's data (no general web knowledge, no data from other
+systems). Concretely, you can help with things like:
+{tool_catalog_text()}
+Describe this in your own words, briefly - do not just paste the tool list
+verbatim.
+
 Otherwise, no tool data was needed for this message.
 {history_text}
 Message: {state['message']}"""
@@ -200,12 +216,15 @@ real, complete answer (zero), not missing data.
 Never state a number or fact that isn't actually present in the data below.
 Refer to things by their human-readable name (e.g. a project's name) - never
 mention an internal slug or id unless the user's question explicitly asked
-for one. If the data below only has a slug/id for something (no real name
-column present), do not invent a display name by reformatting the slug
-(e.g. turning "yeni-gate" into "Yeni Gate") - a reformatted slug is not the
-real name and may be completely wrong. In that case either say you don't
-have the name, or use the raw identifier and note it's an identifier, not
-present it as if it were the name.
+for one. This applies whether the slug is reformatted OR stated exactly as
+it appears in the data (e.g. a step's result has "projectSlug": "yeni-gate" -
+never write "the project yeni-gate" or "Yeni Gate" in the answer; the row's
+real name may be something else entirely, like "Marketing and Tech", and a
+slug is never a safe stand-in for it). If the data below only has a slug/id
+for something (no real name column present), do not invent a display name
+by reformatting the slug either - a reformatted slug is not the real name
+and may be completely wrong. In either case, say you don't have the name
+rather than presenting any form of the slug as if it were one.
 
 Sometimes the data below answers the question using a substituted or
 related figure, not the literally-named one (e.g. a column named

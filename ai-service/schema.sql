@@ -384,6 +384,35 @@ CREATE OR REPLACE FUNCTION ai.session_can_see_others_leave() RETURNS boolean AS 
     SELECT ai.session_has_ability('LEAVES', 'UPDATE');
 $$ LANGUAGE sql STABLE;
 
+-- Whether target_user_id's tenure (Staff.hireDate) has cleared the given
+-- policy's applicableAfter/applicableAfterUnit requirement. Moved into a
+-- function (not left as a WHERE-clause expression generated SQL had to
+-- reproduce correctly every time) because that was structurally
+-- non-deterministic - confirmed live: the same "how many leave days does
+-- Amir have" question, asked twice, correctly showed 0 Annual Leave one run
+-- and wrongly showed 15 the next, because the LLM sometimes omitted the
+-- AGE(...) >= (...)::interval eligibility check from the generated query
+-- and sometimes didn't. A single function call is either included in a
+-- query or it isn't visibly missing - there's no equivalent way to
+-- "partially" get a function call wrong the way a multi-line inline
+-- expression can be silently dropped or malformed.
+-- NULL applicableAfter means no tenure requirement at all - always eligible.
+-- NULL hireDate (should not happen for a real Staff row, but degrade safely
+-- rather than raise) - treated as not yet eligible for anything but a
+-- policy with no requirement, matching the same deny-by-default posture
+-- used everywhere else in this schema for missing/unverifiable data.
+CREATE OR REPLACE FUNCTION ai.leave_policy_is_eligible(target_user_id integer, policy_id integer) RETURNS boolean AS $$
+    SELECT CASE
+        WHEN lp."applicableAfter" IS NULL THEN true
+        WHEN st."hireDate" IS NULL THEN false
+        ELSE AGE(CURRENT_DATE, st."hireDate"::date) >=
+             (lp."applicableAfter" || ' ' || lp."applicableAfterUnit")::interval
+    END
+    FROM public."LeavePolicy" lp
+    LEFT JOIN public."Staff" st ON st."userId" = target_user_id
+    WHERE lp.id = policy_id;
+$$ LANGUAGE sql STABLE;
+
 -- Whether the caller can see OTHER people's time entries (not just their
 -- own) - real catalog entities TIMESHEET_VIEW_ALL / TIMESHEET_MODIFY_OTHERS.
 -- A caller without either can still see their own via the plain memberId =
@@ -569,8 +598,15 @@ CREATE OR REPLACE VIEW ai.v_rag_source AS
 -- a different thing and was previously a source of confusion (a document
 -- named "360 Marketing" does not mean the PROJECT named 360 Marketing is
 -- itself a document).
+-- fileType is added for the 3 document-backed branches (PROJECT_DOCUMENT/
+-- SCOPE_DOCUMENT/MEDIA_PLAN_DOCUMENT) - NULL for the other 4, which have no
+-- underlying file at all. Confirmed live the stored format is NOT
+-- consistent across tables - e.g. ProjectDocument.fileType can be a short
+-- code ('img', 'pdf'), while ScopeDocument/MediaPlanDocument.fileType can
+-- be a full MIME type ('application/pdf') - use ILIKE '%pdf%', not exact
+-- equality, when filtering by file type.
 SELECT rs.id, rs."sourceType"::text AS "sourceType", rs."projectSlug", rs.status, rs."ingestedAt",
-       pd."fileName" AS name
+       pd."fileName" AS name, pd."fileType" AS "fileType"
 FROM ai."RagSource" rs
 JOIN public."ProjectDocument" pd ON pd.id::text = rs."sourceId"
 WHERE rs."sourceType" = 'PROJECT_DOCUMENT'
@@ -580,7 +616,7 @@ WHERE rs."sourceType" = 'PROJECT_DOCUMENT'
 UNION ALL
 
 SELECT rs.id, rs."sourceType"::text, sc."projectSlug", rs.status, rs."ingestedAt",
-       sd."fileName" AS name
+       sd."fileName" AS name, sd."fileType" AS "fileType"
 FROM ai."RagSource" rs
 JOIN public."ScopeDocument" sd ON sd.id::text = rs."sourceId"
 JOIN public."Scope" sc ON sc.slug = sd."scopeSlug"
@@ -596,7 +632,7 @@ WHERE rs."sourceType" = 'SCOPE_DOCUMENT'
 UNION ALL
 
 SELECT rs.id, rs."sourceType"::text, rs."projectSlug", rs.status, rs."ingestedAt",
-       mpd."fileName" AS name
+       mpd."fileName" AS name, mpd."fileType" AS "fileType"
 FROM ai."RagSource" rs
 JOIN public."MediaPlanDocument" mpd ON mpd.id::text = rs."sourceId"
 WHERE rs."sourceType" = 'MEDIA_PLAN_DOCUMENT'
@@ -606,7 +642,7 @@ WHERE rs."sourceType" = 'MEDIA_PLAN_DOCUMENT'
 UNION ALL
 
 SELECT rs.id, rs."sourceType"::text, t."projectSlug", rs.status, rs."ingestedAt",
-       ('Activity on task: ' || t.name) AS name
+       ('Activity on task: ' || t.name) AS name, NULL::text AS "fileType"
 FROM ai."RagSource" rs
 JOIN public."TaskActivity" ta ON ta.id::text = rs."sourceId"
 JOIN public."Task" t ON t.id = ta."taskId"
@@ -617,7 +653,7 @@ WHERE rs."sourceType" = 'ACTIVITY_LOG'
 UNION ALL
 
 SELECT rs.id, rs."sourceType"::text, rs."projectSlug", rs.status, rs."ingestedAt",
-       a.title AS name
+       a.title AS name, NULL::text AS "fileType"
 FROM ai."RagSource" rs
 JOIN public."Announcement" a ON a.id::text = rs."sourceId"
 WHERE rs."sourceType" = 'ANNOUNCEMENT'
@@ -627,7 +663,7 @@ WHERE rs."sourceType" = 'ANNOUNCEMENT'
 UNION ALL
 
 SELECT rs.id, rs."sourceType"::text, rs."projectSlug", rs.status, rs."ingestedAt",
-       ('Comment on: ' || a.title) AS name
+       ('Comment on: ' || a.title) AS name, NULL::text AS "fileType"
 FROM ai."RagSource" rs
 JOIN public."AnnouncementComment" ac ON ac.id::text = rs."sourceId"
 JOIN public."Announcement" a ON a.id = ac."announcementId"
@@ -638,7 +674,7 @@ WHERE rs."sourceType" = 'ANNOUNCEMENT_COMMENT'
 UNION ALL
 
 SELECT rs.id, rs."sourceType"::text, rs."projectSlug", rs.status, rs."ingestedAt",
-       o.detail AS name
+       o.detail AS name, NULL::text AS "fileType"
 FROM ai."RagSource" rs
 JOIN public."Objective" o ON o.id::text = rs."sourceId"
 JOIN public."Goal" g ON g.id = o."goalId"
@@ -1242,5 +1278,5 @@ GRANT SELECT ON public."Project", public."Task", public."TaskAssignee", public."
     public."OrganisationFinance", public."Currency",
     public."SupplierContact", public."ScopeService", public."ScopeSection", public."Service",
     public."RetainerBillingPeriod", public."Resourcing", public."ResourcingMonth", public."CompanyFinancialDetail",
-    public."Invoice"
+    public."Invoice", public."LeavePolicy"
     TO ai_readonly;
