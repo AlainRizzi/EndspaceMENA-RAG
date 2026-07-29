@@ -523,21 +523,33 @@ CREATE OR REPLACE FUNCTION ai.session_has_any_project_read() RETURNS boolean AS 
 $$ LANGUAGE sql STABLE;
 
 CREATE OR REPLACE VIEW ai.v_project AS
+-- isDeleted excluded (not exposed as a column) rather than left for
+-- generated SQL to filter itself - confirmed live this was a real gap: a
+-- soft-deleted project ("test", id=73) was silently returned as a genuine
+-- result for "latest 3 projects" alongside real active ones, because
+-- nothing about the schema description told the LLM isDeleted rows even
+-- existed here, let alone that they needed filtering out on every query.
 SELECT p.id, p.slug, p.name, p."organisationSlug", p."customId", p.description,
        p.status, p.priority, p.type, p."dueDate", p."startDate",
        p."managerId", p."companyId", p."createdAt", p."updatedAt"
 FROM public."Project" p
 WHERE ai.session_has_any_project_read()
-  AND p.slug IN (SELECT * FROM ai.visible_project_slugs());
+  AND p.slug IN (SELECT * FROM ai.visible_project_slugs())
+  AND NOT p."isDeleted";
 
 CREATE OR REPLACE VIEW ai.v_task AS
+-- isDeleted filtered out here, not left exposed as a column for generated
+-- SQL to remember to filter - same reasoning as v_project above (75 of
+-- 2494 real Task rows are soft-deleted; none should ever surface as a live
+-- task in an answer).
 SELECT t.id, t.name, t.description, t."projectSlug", s.name AS status,
-       t."ownerId", t."startDate", t."dueDate", t.estimated, t.logged,
-       t."taskType", t.flagged, t."isDeleted", t."createdAt", t."updatedAt"
+       t."ownerId", t."createdById", t."startDate", t."dueDate", t.estimated, t.logged,
+       t."taskType", t.flagged, t."createdAt", t."updatedAt"
 FROM public."Task" t
 LEFT JOIN public."Status" s ON s.id = t."statusId"
 WHERE ai.session_has_any_project_read()
-  AND t."projectSlug" IN (SELECT * FROM ai.visible_project_slugs());
+  AND t."projectSlug" IN (SELECT * FROM ai.visible_project_slugs())
+  AND NOT t."isDeleted";
 
 CREATE OR REPLACE VIEW ai.v_task_assignee AS
 SELECT ta.id, ta."taskId", t."projectSlug", ta."assigneeId", ta."estimatedTime", ta."createdAt"
@@ -693,6 +705,9 @@ CREATE OR REPLACE VIEW ai.v_scope AS
 -- estCostOfSale/closeProbability/forecastRevenue answer the scope-level
 -- forecast fields (page 22) directly - all plain stored columns already on
 -- Scope, no new joins or gating needed.
+-- isDeleted filtered out (not exposed) - same isDeleted-gap fix applied
+-- across v_project/v_task/v_expense (67 of 245 real Scope rows are
+-- soft-deleted).
 SELECT sc.id, sc.name, sc.slug, sc."customId", sc."projectSlug", sc."organisationSlug",
        sc.status, sc.type, sc."dueDate", sc."companyId", sc."createdAt",
        sc.total, sc."subTotal", sc."estDeal", sc."estRevenue", sc."estCostOfSale",
@@ -705,7 +720,8 @@ WHERE (
     OR ai.session_has_read_ability('SCOPE_VIEW_LINKED')
     OR ai.session_has_read_ability('SCOPE_VIEW_MEMBER')
   )
-  AND (sc."projectSlug" IS NULL OR sc."projectSlug" IN (SELECT * FROM ai.visible_project_slugs()));
+  AND (sc."projectSlug" IS NULL OR sc."projectSlug" IN (SELECT * FROM ai.visible_project_slugs()))
+  AND NOT sc."isDeleted";
 
 -- ---- Finance entities (project-scoped; amounts only, no bank/payment details) ----
 
@@ -756,18 +772,24 @@ CREATE OR REPLACE VIEW ai.v_expense AS
 -- stored columns already on Expense, no new joins. supplierId (NOT
 -- purchaserId, which is the internal User who made the purchase, a
 -- different concept) is the real link to ai.v_supplier below.
+-- isDeleted filtered out (not exposed) - same isDeleted-gap fix applied
+-- across v_project/v_task/v_scope (23 of 89 real Expense rows are
+-- soft-deleted).
 SELECT e.id, e."customId", e."organisationSlug", e."projectSlug", e."purchaserId",
        e."purchaseDate", e."dueDate", e.cost, e.billed, e.profit, e.action,
        ai.org_currency_symbol(e."organisationSlug") AS currency,
        e."supplierId", e.markup, e."markupType", e."totalPaid", e.balance, e.status
 FROM public."Expense" e
-WHERE ai.session_has_read_ability('EXPENSE_READ_ALL_LIST')
-   OR ai.session_has_read_ability_family('EXPENSE')
-   OR (
-       ai.session_has_read_ability('EXPENSE_VIEW_PROJECT_LINKED')
-       AND e."projectSlug" IS NOT NULL
-       AND e."projectSlug" IN (SELECT * FROM ai.visible_project_slugs())
-   );
+WHERE (
+    ai.session_has_read_ability('EXPENSE_READ_ALL_LIST')
+     OR ai.session_has_read_ability_family('EXPENSE')
+     OR (
+         ai.session_has_read_ability('EXPENSE_VIEW_PROJECT_LINKED')
+         AND e."projectSlug" IS NOT NULL
+         AND e."projectSlug" IN (SELECT * FROM ai.visible_project_slugs())
+     )
+  )
+  AND NOT e."isDeleted";
 
 -- ---- Tier 2 (GraySync Formulas reference): supplier, scope-service,
 -- retainer, resourcing, and customer rollups ----
@@ -1093,6 +1115,25 @@ FROM public."Skill" s
 WHERE ai.session_has_read_ability('ORG_SKILLS')
   AND s."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs());
 
+-- Staff.jobTitle is free-text HR data, not a controlled vocabulary - a real
+-- row was found with jobTitle literally set to 'superadmin' (dev/test data
+-- error, not a real job title), which every view exposing jobTitle then
+-- faithfully reported as the person's job title, including to themselves
+-- ("what is my role" -> "Your role is superadmin"). No system-privilege
+-- field is actually being exposed here (isSuperAdmin lives on User, is
+-- never selected by any view, and generated SQL cannot reach it - confirmed
+-- against ALLOWED_VIEWS), but the jobTitle text itself must never echo
+-- system/admin-privilege language back to a user, for anyone, regardless of
+-- what free text ends up in this column. Scrub at the view level (not left
+-- to prompt wording) so this holds unconditionally rather than depending on
+-- the LLM remembering the rule for every possible phrasing of this data.
+CREATE OR REPLACE FUNCTION ai.scrub_job_title(title text) RETURNS text AS $
+    SELECT CASE
+        WHEN title ~* '(super[\s_-]?admin|\badmin\b|administrator)' THEN NULL
+        ELSE title
+    END;
+$ LANGUAGE sql IMMUTABLE;
+
 -- ---- Record-owned entities ("own" = about me, or a manager/admin viewing anyone) ----
 
 -- Directory-level identity: no personal-record ownership gate (see v_staff
@@ -1109,7 +1150,8 @@ WHERE ai.session_has_read_ability('ORG_SKILLS')
 -- into a name/job title - visible as a project member, but silently
 -- anonymous, for no reason tied to an actual permission boundary.
 CREATE OR REPLACE VIEW ai.v_staff_directory AS
-SELECT DISTINCT st."userId", u."fullName", u."organisationSlug", st."jobTitle", st."departmentId", st."positionId"
+SELECT DISTINCT st."userId", u."fullName", u."organisationSlug",
+       ai.scrub_job_title(st."jobTitle") AS "jobTitle", st."departmentId", st."positionId"
 FROM public."Staff" st
 JOIN public."User" u ON u.id = st."userId"
 WHERE ai.session_has_read_ability('PEOPLE_INTERNAL')
@@ -1124,7 +1166,8 @@ CREATE OR REPLACE VIEW ai.v_staff AS
 -- GraySync-API path, not free-form SQL).
 -- hireDate/employmentStatus are more personal than the directory-level
 -- fields above (v_staff_directory) - stay gated to own record or manager/admin.
-SELECT st."userId", u."fullName", u."organisationSlug", st."jobTitle", st."employmentStatus",
+SELECT st."userId", u."fullName", u."organisationSlug",
+       ai.scrub_job_title(st."jobTitle") AS "jobTitle", st."employmentStatus",
        st."hireDate", st."departmentId", st."positionId"
 FROM public."Staff" st
 JOIN public."User" u ON u.id = st."userId"

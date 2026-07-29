@@ -85,12 +85,28 @@ v_rag_source(id, sourceType, projectSlug, status, ingestedAt, name, fileType)
   OBJECTIVE. This lists WHAT EXISTS, not document CONTENT - to search inside
   a document's actual text, use the search_knowledge_base tool instead, not
   this view.
-v_task(id, name, description, projectSlug, status, ownerId, startDate, dueDate, estimated, logged, taskType, flagged, isDeleted, createdAt, updatedAt)
-  - ownerId is who the task actually belongs to in this data - "who has/owns
-  this task", "my tasks", "tasks assigned to X" should filter on v_task.ownerId
-  first. v_task_assignee (below) is a separate, often-empty table - do not
-  assume a task has an assignee there just because it has an owner here.
+v_task(id, name, description, projectSlug, status, ownerId, createdById, startDate, dueDate, estimated, logged, taskType, flagged, createdAt, updatedAt)
+  - ownerId is a task-level owner field, but real per-person ASSIGNMENT lives
+  in v_task_assignee.assigneeId (see below) - CONFIRMED LIVE: v_task_assignee
+  has 1000+ real rows across 40+ distinct people, it is NOT often-empty, and
+  a real person can have task assignments there that never show up via
+  ownerId at all (a task owned/created by someone else can still be
+  genuinely assigned to a different person via v_task_assignee - this is
+  common, not an edge case). Never rely on ownerId alone to answer "tasks
+  assigned to X" or "what tasks am I on" - always check v_task_assignee too.
+  createdById is who ORIGINALLY CREATED the task - a DIFFERENT person from
+  ownerId/assigneeId in general (e.g. a manager creates a task and assigns
+  it to someone else). "tasks I created", "tasks I made", "tasks assigned BY
+  me" (as opposed to "assigned TO me") must filter on createdById only.
+  "my tasks" / "what tasks am I on" / "tasks assigned to me" (no more
+  specific wording than "created") means the union of ALL of: ownerId = me,
+  OR createdById = me, OR EXISTS a v_task_assignee row with assigneeId = me
+  for that task - never just one of these three, unless the user's own
+  wording narrows it specifically to "created" (createdById only).
 v_task_assignee(id, taskId, projectSlug, assigneeId, estimatedTime, createdAt)
+  - THIS is where most real per-person task assignment actually lives (see
+  v_task.assigneeId note above) - always join/EXISTS against this for any
+  "assigned to X" or "my tasks" question, not just v_task.ownerId.
 v_task_activity(id, taskId, taskName, projectSlug, createdAt)
 v_scope(id, name, slug, customId, projectSlug, organisationSlug, status, type, dueDate, companyId, createdAt, total, subTotal, estDeal, estRevenue, estCostOfSale, forecastRevenue, closeProbability, wonAt, currency)
   - total is the scope's approved/contracted amount ("Contracted Revenue" for

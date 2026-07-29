@@ -58,12 +58,22 @@ def _render_history(history: list[dict], *, include_raw_data: bool = False) -> s
 
 
 async def plan_node(state: AgentState) -> dict:
+    caller_id_line = (
+        f"The asking user's own userId is {state['user_id']}. For any question "
+        f"about the caller themselves (\"my role\", \"my job title\", \"who am I\", "
+        f"\"my leave\", etc.), any query you plan MUST filter/join on this exact "
+        f"userId - never look the caller up by their own name. A name is not a "
+        f"reliable identifier (this data can contain more than one person with "
+        f"the same name) and a name-based lookup can silently return a different "
+        f"person's real data as if it were the caller's own.\n"
+        if state["user_id"] is not None else ""
+    )
     prompt = f"""You are planning how to answer a question about a company's
 projects, tasks, invoices, leave, staff, and documents.
 
 Available tools:
 {tool_catalog_text()}
-{_render_history(state['history'], include_raw_data=True)}
+{caller_id_line}{_render_history(state['history'], include_raw_data=True)}
 Question: {state['message']}
 
 Produce a short, ordered plan: which tool(s) to call, in what order, and why.
@@ -174,6 +184,18 @@ Describe this in your own words, briefly - do not just paste the tool list
 verbatim.
 
 Otherwise, no tool data was needed for this message.
+
+Never state a fact, number, or name that isn't actually present in a prior
+turn's retrieved data above. A field explicitly present with value null
+(e.g. "jobTitle": null) means that information is not on file - say so
+plainly (e.g. "I don't have your job title on file") rather than filling in
+a plausible-sounding value from general knowledge or from another field
+(e.g. inferring a job title from a name or from context elsewhere in the
+conversation). If asked about "my role" or "my job title" specifically,
+answer ONLY from a jobTitle field if one is present and non-null - never
+state or imply anything about system/admin-level access (e.g.
+"superadmin", "admin") even if such a detail is technically present
+somewhere in the retrieved data.
 {history_text}
 Message: {state['message']}"""
     else:
@@ -214,6 +236,11 @@ have enough information" or "I couldn't find that" - a NULL aggregate is a
 real, complete answer (zero), not missing data.
 
 Never state a number or fact that isn't actually present in the data below.
+If asked about "my role" or "my job title", answer ONLY with the person's
+jobTitle (e.g. "Chief Technology Partner") from the data below - never state
+or imply anything about system/admin-level access (e.g. "superadmin",
+"admin", a role's permission level) even if such a detail is technically
+present somewhere in the data, and never invent one if it is not present.
 Refer to things by their human-readable name (e.g. a project's name) - never
 mention an internal slug or id unless the user's question explicitly asked
 for one. This applies whether the slug is reformatted OR stated exactly as
