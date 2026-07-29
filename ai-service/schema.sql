@@ -542,6 +542,109 @@ WHERE ai.session_has_read_ability('PROJECT_LOG')
 -- exposed raw here; the RAG-ingested plain text (RagChunk, sourceType =
 -- 'ACTIVITY_LOG') is the searchable text form of this same data.
 
+CREATE OR REPLACE VIEW ai.v_rag_source AS
+-- Inventory of what's actually been ingested into the knowledge base
+-- (ai.RagSource/ai.RagChunk), for "what documents are in RAG" /
+-- "which documents does project X have" style questions -
+-- search_knowledge_base only searches document CONTENT semantically, it
+-- cannot enumerate what exists, which is what this view is for.
+--
+-- Each RagSourceType is gated by the SAME visibility rule as its real
+-- underlying entity's own existing view (v_task_activity, v_announcement,
+-- v_objective, ...) - not a separate ability, since RagSource is metadata
+-- describing an ingested copy of data the caller either can or can't
+-- already see through the normal views. Only the 7 RagSourceType values
+-- with real, populated ingestion as of this build are covered
+-- (PROJECT_DOCUMENT, SCOPE_DOCUMENT, MEDIA_PLAN_DOCUMENT, ACTIVITY_LOG,
+-- ANNOUNCEMENT, ANNOUNCEMENT_COMMENT, OBJECTIVE) - the other 11
+-- RagSourceType enum values have zero rows in this environment and are
+-- omitted rather than guessed at.
+--
+-- name is resolved per-type from the real backing table (ProjectDocument.
+-- fileName, ScopeDocument.fileName, MediaPlanDocument.fileName, the parent
+-- Task's name for an activity-log entry - TaskActivity.content is Slate/
+-- Plate rich-text jsonb, not a usable name, see v_task_activity's note
+-- above - Announcement.title, a truncated AnnouncementComment.contentText,
+-- Objective.detail) - never the enclosing project/org's own name, which is
+-- a different thing and was previously a source of confusion (a document
+-- named "360 Marketing" does not mean the PROJECT named 360 Marketing is
+-- itself a document).
+SELECT rs.id, rs."sourceType"::text AS "sourceType", rs."projectSlug", rs.status, rs."ingestedAt",
+       pd."fileName" AS name
+FROM ai."RagSource" rs
+JOIN public."ProjectDocument" pd ON pd.id::text = rs."sourceId"
+WHERE rs."sourceType" = 'PROJECT_DOCUMENT'
+  AND ai.session_has_any_project_read()
+  AND rs."projectSlug" IN (SELECT * FROM ai.visible_project_slugs())
+
+UNION ALL
+
+SELECT rs.id, rs."sourceType"::text, sc."projectSlug", rs.status, rs."ingestedAt",
+       sd."fileName" AS name
+FROM ai."RagSource" rs
+JOIN public."ScopeDocument" sd ON sd.id::text = rs."sourceId"
+JOIN public."Scope" sc ON sc.slug = sd."scopeSlug"
+WHERE rs."sourceType" = 'SCOPE_DOCUMENT'
+  AND (
+    ai.session_has_read_ability('SCOPE')
+    OR ai.session_has_read_ability('SCOPE_VIEW_ALL')
+    OR ai.session_has_read_ability('SCOPE_VIEW_LINKED')
+    OR ai.session_has_read_ability('SCOPE_VIEW_MEMBER')
+  )
+  AND (sc."projectSlug" IS NULL OR sc."projectSlug" IN (SELECT * FROM ai.visible_project_slugs()))
+
+UNION ALL
+
+SELECT rs.id, rs."sourceType"::text, rs."projectSlug", rs.status, rs."ingestedAt",
+       mpd."fileName" AS name
+FROM ai."RagSource" rs
+JOIN public."MediaPlanDocument" mpd ON mpd.id::text = rs."sourceId"
+WHERE rs."sourceType" = 'MEDIA_PLAN_DOCUMENT'
+  AND ai.session_has_any_project_read()
+  AND (rs."projectSlug" IS NULL OR rs."projectSlug" IN (SELECT * FROM ai.visible_project_slugs()))
+
+UNION ALL
+
+SELECT rs.id, rs."sourceType"::text, t."projectSlug", rs.status, rs."ingestedAt",
+       ('Activity on task: ' || t.name) AS name
+FROM ai."RagSource" rs
+JOIN public."TaskActivity" ta ON ta.id::text = rs."sourceId"
+JOIN public."Task" t ON t.id = ta."taskId"
+WHERE rs."sourceType" = 'ACTIVITY_LOG'
+  AND ai.session_has_read_ability('PROJECT_LOG')
+  AND t."projectSlug" IN (SELECT * FROM ai.visible_project_slugs())
+
+UNION ALL
+
+SELECT rs.id, rs."sourceType"::text, rs."projectSlug", rs.status, rs."ingestedAt",
+       a.title AS name
+FROM ai."RagSource" rs
+JOIN public."Announcement" a ON a.id::text = rs."sourceId"
+WHERE rs."sourceType" = 'ANNOUNCEMENT'
+  AND ai.session_has_read_ability('ANNOUNCEMENT')
+  AND a."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs())
+
+UNION ALL
+
+SELECT rs.id, rs."sourceType"::text, rs."projectSlug", rs.status, rs."ingestedAt",
+       ('Comment on: ' || a.title) AS name
+FROM ai."RagSource" rs
+JOIN public."AnnouncementComment" ac ON ac.id::text = rs."sourceId"
+JOIN public."Announcement" a ON a.id = ac."announcementId"
+WHERE rs."sourceType" = 'ANNOUNCEMENT_COMMENT'
+  AND ai.session_has_read_ability('ANNOUNCEMENT')
+  AND a."organisationSlug" IN (SELECT * FROM ai.session_visible_orgs())
+
+UNION ALL
+
+SELECT rs.id, rs."sourceType"::text, rs."projectSlug", rs.status, rs."ingestedAt",
+       o.detail AS name
+FROM ai."RagSource" rs
+JOIN public."Objective" o ON o.id::text = rs."sourceId"
+JOIN public."Goal" g ON g.id = o."goalId"
+WHERE rs."sourceType" = 'OBJECTIVE'
+  AND ai.session_can_see_user(g."userId");
+
 CREATE OR REPLACE VIEW ai.v_scope AS
 -- SCOPE (full edit), SCOPE_VIEW_ALL, SCOPE_VIEW_LINKED, SCOPE_VIEW_MEMBER are
 -- the real catalog's scope-read abilities (defaults.json "Scopes" tab) -
@@ -581,7 +684,7 @@ CREATE OR REPLACE VIEW ai.v_invoice AS
 -- project-linked-only concept, so its holders always saw every invoice.
 SELECT i.id, i."customId", i."organisationSlug", i."companyId", i."projectSlug", i."scopeSlug",
        i.type, i."issueDate", i."dueDate", i."amountPaid", i."paidAt", i."paymentStatus", i.balance,
-       ai.org_currency_symbol(i."organisationSlug") AS currency
+       ai.org_currency_symbol(i."organisationSlug") AS currency, i."billToFinancialDetailId"
 FROM public."Invoice" i
 WHERE ai.session_has_read_ability('INVOICE_VIEW_ALL')
    OR ai.session_has_read_ability('INVOICE')
@@ -612,9 +715,15 @@ CREATE OR REPLACE VIEW ai.v_expense AS
 -- expenses can necessarily see them, and plain legacy EXPENSE (role ids 1,
 -- 37 - "Owner") behaves like org-wide READ_ALL_LIST for the same reason as
 -- v_invoice's legacy INVOICE fallback above.
+-- Cost-of-Goods columns (supplierId, markup, markupType, totalPaid, balance,
+-- status) added per Tier 2 of the GraySync Formulas reference - all plain
+-- stored columns already on Expense, no new joins. supplierId (NOT
+-- purchaserId, which is the internal User who made the purchase, a
+-- different concept) is the real link to ai.v_supplier below.
 SELECT e.id, e."customId", e."organisationSlug", e."projectSlug", e."purchaserId",
        e."purchaseDate", e."dueDate", e.cost, e.billed, e.profit, e.action,
-       ai.org_currency_symbol(e."organisationSlug") AS currency
+       ai.org_currency_symbol(e."organisationSlug") AS currency,
+       e."supplierId", e.markup, e."markupType", e."totalPaid", e.balance, e.status
 FROM public."Expense" e
 WHERE ai.session_has_read_ability('EXPENSE_READ_ALL_LIST')
    OR ai.session_has_read_ability_family('EXPENSE')
@@ -623,6 +732,116 @@ WHERE ai.session_has_read_ability('EXPENSE_READ_ALL_LIST')
        AND e."projectSlug" IS NOT NULL
        AND e."projectSlug" IN (SELECT * FROM ai.visible_project_slugs())
    );
+
+-- ---- Tier 2 (GraySync Formulas reference): supplier, scope-service,
+-- retainer, resourcing, and customer rollups ----
+
+CREATE OR REPLACE VIEW ai.v_supplier AS
+-- One row per supplier, visibility derived transitively through the
+-- expenses linked to it (a supplier has no direct project/org column of
+-- its own, and no dedicated SUPPLIER catalog entity exists - confirmed
+-- against defaults.json during the original permission-model build) - same
+-- ability gate as v_expense, since a supplier is only reachable through
+-- expenses the caller can already see.
+SELECT sc.id, sc."customId", sc."paymentStatus", sc."mainTradingName",
+       COUNT(e.id) AS total_expenses,
+       COALESCE(SUM(e.cost), 0) AS total_cost_of_goods,
+       COALESCE(SUM(e.billed), 0) AS total_billed,
+       COALESCE(SUM(e.profit), 0) AS total_profit,
+       COALESCE(SUM(e.balance), 0) AS total_outstanding
+FROM public."SupplierContact" sc
+JOIN public."Expense" e ON e."supplierId" = sc.id
+WHERE (
+    ai.session_has_read_ability('EXPENSE_READ_ALL_LIST')
+    OR ai.session_has_read_ability_family('EXPENSE')
+    OR (
+        ai.session_has_read_ability('EXPENSE_VIEW_PROJECT_LINKED')
+        AND e."projectSlug" IS NOT NULL
+        AND e."projectSlug" IN (SELECT * FROM ai.visible_project_slugs())
+    )
+  )
+GROUP BY sc.id, sc."customId", sc."paymentStatus", sc."mainTradingName";
+
+CREATE OR REPLACE VIEW ai.v_scope_service AS
+-- Per-service budget breakdown (the SCO-10010001-style rows on a project's
+-- Budgets page). labour_cost_actual sums ALL of a scope's TimeEntry rows,
+-- NOT per-service - TimeEntry links to taskId/scopeSlug, not to a specific
+-- ScopeService row, so a true per-service labour split isn't reachable from
+-- the current schema. This is an approximation, documented in
+-- chat/tools_sql.py's schema description - never present it as exact.
+SELECT
+    ss.id, ss."sectionId", sec."scopeSlug", sc."projectSlug",
+    svc.name AS "serviceName", ss.quantity, ss."totalCost", ss."totalAmount",
+    COALESCE((
+        SELECT SUM(te.cost) FROM public."TimeEntry" te WHERE te."scopeSlug" = sec."scopeSlug"
+    ), 0) AS labour_cost_actual,
+    ai.org_currency_symbol(sc."organisationSlug") AS currency
+FROM public."ScopeService" ss
+JOIN public."ScopeSection" sec ON sec.id = ss."sectionId"
+JOIN public."Scope" sc ON sc.slug = sec."scopeSlug"
+LEFT JOIN public."Service" svc ON svc.id = ss."serviceId"
+WHERE (
+    ai.session_has_read_ability('SCOPE')
+    OR ai.session_has_read_ability('SCOPE_VIEW_ALL')
+    OR ai.session_has_read_ability('SCOPE_VIEW_LINKED')
+    OR ai.session_has_read_ability('SCOPE_VIEW_MEMBER')
+  )
+  AND (sc."projectSlug" IS NULL OR sc."projectSlug" IN (SELECT * FROM ai.visible_project_slugs()));
+
+CREATE OR REPLACE VIEW ai.v_retainer_period AS
+-- Per-billing-period retainer tracking. budgetedHours/budgetedAmount can be
+-- NULL for a period (confirmed live on a sample row) - that's a real,
+-- possibly-not-yet-configured period, not a system error; treat NULL the
+-- same "not a real zero" way as v_project_budget's data-gap columns, not as
+-- 0.
+SELECT rbp.id, rbp."projectSlug", rbp."scopeSlug", rbp."periodName", rbp."periodIndex",
+       rbp."startDate", rbp."endDate", rbp."budgetedHours", rbp."budgetedAmount",
+       rbp."usedHours", rbp."incomeToDate",
+       ai.org_currency_symbol(rbp."organisationSlug") AS currency
+FROM public."RetainerBillingPeriod" rbp
+WHERE ai.session_has_any_project_read()
+  AND rbp."projectSlug" IN (SELECT * FROM ai.visible_project_slugs());
+
+CREATE OR REPLACE VIEW ai.v_resourcing AS
+-- Planned allocation per scope/member/month - the well-defined half of
+-- "Time Allocation" (GraySync Formulas page 9). Resourcing/ResourcingMonth
+-- have NO foreign key to Task at all (confirmed against the schema) - the
+-- source reference's "MAX allocation between resourcing and task details"
+-- cannot be expressed as a direct SQL join here; this view only exposes the
+-- resourcing-side allocation, not a task comparison.
+SELECT r.id, r."scopeSlug", sc."projectSlug", r."memberId", r."futureResourcing",
+       rm.month, rm.year, rm.value AS allocated_hours, rm.status
+FROM public."Resourcing" r
+JOIN public."Scope" sc ON sc.slug = r."scopeSlug"
+LEFT JOIN public."ResourcingMonth" rm ON rm."resourcingId" = r.id
+WHERE ai.session_has_any_project_read()
+  AND sc."projectSlug" IN (SELECT * FROM ai.visible_project_slugs());
+
+CREATE OR REPLACE VIEW ai.v_customer AS
+-- Customer/company financial-detail rollup - covers both invoice-customer
+-- aggregates and project-customer detail, since Project.financialDetailId
+-- and Invoice.billToFinancialDetailId both resolve to the same
+-- CompanyFinancialDetail table (confirmed during Tier 1's verification
+-- pass). Same ability gate as v_invoice, since a customer is only reachable
+-- through invoices billed to them - no separate CUSTOMER catalog entity.
+-- deletedAt IS NULL excludes soft-deleted customer records.
+SELECT cfd.id, cfd."companyId", cfd.name, cfd.email, cfd.abn,
+       COUNT(DISTINCT i.id) AS total_invoices,
+       COALESCE(SUM(i."amountPaid"), 0) AS total_paid,
+       COALESCE(SUM(i.balance), 0) AS total_outstanding_balance
+FROM public."CompanyFinancialDetail" cfd
+JOIN public."Invoice" i ON i."billToFinancialDetailId" = cfd.id
+WHERE cfd."deletedAt" IS NULL
+  AND (
+    ai.session_has_read_ability('INVOICE_VIEW_ALL')
+    OR ai.session_has_read_ability('INVOICE')
+    OR (
+        ai.session_has_read_ability('INVOICE_VIEW_PROJECT_LINKED')
+        AND i."projectSlug" IS NOT NULL
+        AND i."projectSlug" IN (SELECT * FROM ai.visible_project_slugs())
+    )
+  )
+GROUP BY cfd.id, cfd."companyId", cfd.name, cfd.email, cfd.abn;
 
 CREATE OR REPLACE VIEW ai.v_quote AS
 -- Quote has no dedicated Entity in the real permission catalog (confirmed
@@ -1004,6 +1223,7 @@ GRANT SELECT ON
     ai.v_project, ai.v_project_member, ai.v_task, ai.v_task_assignee, ai.v_task_activity, ai.v_scope,
     ai.v_invoice, ai.v_invoice_item, ai.v_expense, ai.v_quote, ai.v_budget, ai.v_budget_data, ai.v_rate_card,
     ai.v_time_entry, ai.v_project_member_rate, ai.v_project_budget,
+    ai.v_supplier, ai.v_scope_service, ai.v_retainer_period, ai.v_resourcing, ai.v_customer,
     ai.v_announcement, ai.v_announcement_comment, ai.v_contact, ai.v_company_contact,
     ai.v_department, ai.v_position, ai.v_skill,
     ai.v_staff_directory, ai.v_staff, ai.v_user_skill, ai.v_leave_request, ai.v_leave_policy, ai.v_staff_leave_balance,
@@ -1019,5 +1239,8 @@ GRANT SELECT ON public."Project", public."Task", public."TaskAssignee", public."
     public."User", public."Staff", public."LeaveGroup", public."Ability",
     public."UserOrganisationAccess", public."Organisation", public."BudgetData", public."AccountBudget",
     public."TimeEntry", public."ProjectMemberRate", public."Scope", public."Expense",
-    public."OrganisationFinance", public."Currency"
+    public."OrganisationFinance", public."Currency",
+    public."SupplierContact", public."ScopeService", public."ScopeSection", public."Service",
+    public."RetainerBillingPeriod", public."Resourcing", public."ResourcingMonth", public."CompanyFinancialDetail",
+    public."Invoice"
     TO ai_readonly;

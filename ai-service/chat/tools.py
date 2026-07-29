@@ -33,10 +33,14 @@ async def _run_list_my_leave_requests(org_slug: str, user_id: int | None) -> lis
 async def _run_search_knowledge_base(
     org_slug: str, user_id: int | None, *, query: str, project_slug: str | None = None
 ) -> list[dict]:
-    # search_knowledge_base genuinely still needs org_slug - it queries
-    # RagChunk via retrieval_service, a different subsystem from the ai.v_*
-    # Ability-gated views, and RagChunk really is org-scoped.
-    return await tools_read.search_knowledge_base(query, org_slug, project_slug)
+    # org_slug is NOT used here (kept only because every tool shares this
+    # call signature) - search_knowledge_base's visibility is Ability/
+    # visible_project_slugs()-based via retrieval_service.search, matching
+    # every ai.v_* view. Previously this genuinely was org-scoped with no
+    # Ability check at all - a real gap (any user could search/read any
+    # content in their org regardless of role) fixed by requiring user_id
+    # instead; see retrieval_service.search's docstring for the full reasoning.
+    return await tools_read.search_knowledge_base(query, user_id, project_slug)
 
 
 async def _run_query_data(org_slug: str, user_id: int | None, *, question: str) -> list[dict]:

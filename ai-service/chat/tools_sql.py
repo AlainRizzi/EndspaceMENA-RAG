@@ -48,9 +48,48 @@ v_scope(id, name, slug, customId, projectSlug, organisationSlug, status, type, d
   closeProbability are pre-close forecast figures for a not-yet-won scope;
   forecastRevenue = estDeal * closeProbability. wonAt is set once the scope
   is actually won (status = 'WON').
-v_invoice(id, customId, organisationSlug, companyId, projectSlug, scopeSlug, type, issueDate, dueDate, amountPaid, paidAt, paymentStatus, balance, currency)
+v_invoice(id, customId, organisationSlug, companyId, projectSlug, scopeSlug, type, issueDate, dueDate, amountPaid, paidAt, paymentStatus, balance, currency, billToFinancialDetailId)
 v_invoice_item(id, invoiceId, description, quantity, unitPrice, discount, amount, currency)
-v_expense(id, customId, organisationSlug, projectSlug, purchaserId, purchaseDate, dueDate, cost, billed, profit, action, currency)
+v_expense(id, customId, organisationSlug, projectSlug, purchaserId, purchaseDate, dueDate, cost, billed, profit, action, currency, supplierId, markup, markupType, totalPaid, balance, status)
+  - purchaserId is the internal staff member who made the purchase - NOT the
+  supplier. supplierId identifies the actual supplier/vendor (join
+  v_supplier below for supplier-level detail). "Cost of Goods" = cost;
+  "Billed Amount" = billed; profit = billed - cost.
+v_supplier(id, customId, paymentStatus, mainTradingName, total_expenses, total_cost_of_goods, total_billed, total_profit, total_outstanding)
+  - one row per supplier, already rolled up across every expense linked to
+  it that the caller can see. Use this instead of manually aggregating
+  v_expense by supplierId.
+v_scope_service(id, sectionId, scopeSlug, projectSlug, serviceName, quantity, totalCost, totalAmount, labour_cost_actual, currency)
+  - per-service budget line within a scope (a scope's individual billable
+  services, e.g. "Social Media Marketing", "Website Redesign"). totalAmount
+  is the service's contracted price. KNOWN APPROXIMATION:
+  labour_cost_actual sums ALL of the parent scope's logged time, not just
+  time logged specifically against this one service - there is no
+  per-service time-tracking link in this data. If a question needs an exact
+  per-service labour cost, say this figure is scope-wide, not
+  service-specific.
+v_retainer_period(id, projectSlug, scopeSlug, periodName, periodIndex, startDate, endDate, budgetedHours, budgetedAmount, usedHours, incomeToDate, currency)
+  - one row per retainer billing period (e.g. "May 2026") for a project on
+  a retainer arrangement. budgetedHours/budgetedAmount can be NULL for a
+  period that hasn't had a budget configured yet (confirmed live) - that is
+  a real gap in that period's setup, not a zero; say so rather than
+  treating NULL as 0 for these two columns specifically. usedHours/
+  incomeToDate are always real numbers (default to 0, not NULL).
+v_resourcing(id, scopeSlug, projectSlug, memberId, futureResourcing, month, year, allocated_hours, status)
+  - planned staffing allocation per person per month for a scope. This is
+  PLANNED allocation only, not actual logged time - for actual hours
+  worked, use v_time_entry instead. There is no link between this and
+  v_task/task estimates in this data - never compare or combine
+  allocated_hours with v_task.estimated as if they were the same kind of
+  number.
+v_customer(id, companyId, name, email, abn, total_invoices, total_paid, total_outstanding_balance)
+  - the customer/company an invoice is billed to (their financial/billing
+  contact record - name, email, abn). To find the customer for a specific
+  project/invoice: v_invoice.billToFinancialDetailId = v_customer.id (join
+  on that column). Use this for "who is the customer for project X" or
+  "what's the ABN on the latest invoice for project X" style questions -
+  find the relevant invoice(s) in v_invoice first, then join to v_customer
+  on billToFinancialDetailId.
 v_quote(id, quote_number, job_title, organisationSlug, project_id, issued_on, subtotal, gst, total, status, currency)
 v_rate_card(id, rateCardGroupId, positionId, hourlyRate, dailyRate)
 v_announcement(id, organisationSlug, authorUserId, type, status, title, contentText, startsAt, endsAt, isPinned, publishedAt, createdAt)

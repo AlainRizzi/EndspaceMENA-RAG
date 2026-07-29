@@ -8,6 +8,7 @@ ALLOWED_VIEWS = {
     "v_project", "v_project_member", "v_task", "v_task_assignee", "v_task_activity", "v_scope",
     "v_invoice", "v_invoice_item", "v_expense", "v_quote", "v_budget", "v_budget_data", "v_rate_card",
     "v_time_entry", "v_project_member_rate", "v_project_budget",
+    "v_supplier", "v_scope_service", "v_retainer_period", "v_resourcing", "v_customer",
     "v_announcement", "v_announcement_comment", "v_contact", "v_company_contact",
     "v_department", "v_position", "v_skill",
     "v_staff_directory", "v_staff", "v_user_skill", "v_leave_request", "v_leave_policy", "v_staff_leave_balance",
@@ -43,6 +44,12 @@ _MIXED_CASE_COLUMNS = {
     "closeProbability", "wonAt",
     # v_time_entry / v_project_member_rate / v_project_budget (Tier 1)
     "memberId", "recordType", "dayCreated", "staffId",
+    # v_supplier / v_scope_service / v_retainer_period / v_resourcing /
+    # v_customer (Tier 2 GraySync Formulas integration)
+    "supplierId", "paymentStatus", "mainTradingName", "sectionId", "serviceId",
+    "totalCost", "totalAmount", "budgetedHours", "budgetedAmount", "usedHours",
+    "incomeToDate", "periodName", "periodIndex", "futureResourcing", "markupType",
+    "totalPaid",
 }
 _MIXED_CASE_COLUMNS_LOWER = {c.lower(): c for c in _MIXED_CASE_COLUMNS}
 

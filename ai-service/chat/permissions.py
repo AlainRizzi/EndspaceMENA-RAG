@@ -37,6 +37,11 @@ VIEW_ENTITY_FAMILIES: dict[str, list[str]] = {
     "v_budget_data": ["PROJECT_BUDGET"],
     "v_project_member_rate": ["PROJECT_BUDGET"],
     "v_project_budget": ["PROJECT_BUDGET"],
+    "v_supplier": ["EXPENSE_READ_ALL_LIST", "EXPENSE_VIEW_PROJECT_LINKED", "EXPENSE"],
+    "v_scope_service": ["SCOPE", "SCOPE_VIEW_ALL", "SCOPE_VIEW_LINKED", "SCOPE_VIEW_MEMBER"],
+    "v_retainer_period": ["PROJECT", "PROJECT_VIEW_OTHERS", "PROJECT_MODIFY_MEMBER"],
+    "v_resourcing": ["PROJECT", "PROJECT_VIEW_OTHERS", "PROJECT_MODIFY_MEMBER"],
+    "v_customer": ["INVOICE_VIEW_ALL", "INVOICE_VIEW_PROJECT_LINKED", "INVOICE"],
     "v_announcement": ["ANNOUNCEMENT"],
     "v_announcement_comment": ["ANNOUNCEMENT"],
     "v_contact": ["COMPANY"],
@@ -73,6 +78,14 @@ VIEW_ENTITY_FAMILIES: dict[str, list[str]] = {
     # many hours did I log" even though his role holds TIME_ENTRIES:READ and
     # TIMESHEET_VIEW_OWN outright; fixed at the view level, and per the same
     # own-row precedent above, this pre-check can't safely gate it either.
+    #
+    # v_rag_source is absent too - it's a UNION ALL of 7 independently-gated
+    # branches (one per RagSourceType, each mirroring its own real view's
+    # visibility rule - see schema.sql), not one single-family check like
+    # every entry above. There's no one family that correctly describes
+    # "can the caller see this view at all" for a query that might touch any
+    # mix of the 7 branches - the view's own per-branch WHERE clauses are
+    # the real (and only) enforcement here, same as v_goal's fallthrough.
 }
 
 
@@ -114,3 +127,41 @@ async def find_missing_entities(referenced_views: set[str], user_id: int | None)
         view for view in referenced_views
         if VIEW_ENTITY_FAMILIES.get(view) and not (held & set(VIEW_ENTITY_FAMILIES[view]))
     ]
+
+
+async def visible_rag_source_ids(candidate_ids: list[int], user_id: int | None) -> set[int]:
+    """Which of the given ai.RagSource.id values the caller can actually see,
+    per ai.v_rag_source's real per-RagSourceType visibility rule (mirrors
+    each entity's own existing view - v_task_activity, v_announcement,
+    v_objective, ... - not a separate ability). Used by
+    retrieval_service.search() to filter RagChunk results, which are
+    otherwise fetched via the full-privilege pool with NO Ability check at
+    all (confirmed: that query only ever filtered by organisationSlug,
+    letting any user in an org semantically search/read content their role
+    has no ability for, or that belongs to a project they aren't on -
+    exactly the gap every ai.v_* view exists to prevent everywhere else).
+
+    Deliberately reuses ai.v_rag_source itself (queried as ai_readonly)
+    rather than re-implementing its 7-branch UNION ALL gating logic here in
+    Python - one source of truth for "what can this user see in RAG,"
+    shared by both the "list what's ingested" tool and this filter.
+
+    No org_slug parameter - same reason it's not a parameter to any other
+    visibility check in this file: a person's real project/org relationships
+    can span more than one organisation (confirmed live earlier this
+    session - a user with real cross-org UserOrganisationAccess/project
+    membership), and organisationSlug was deliberately removed as a hard
+    filter everywhere else for exactly that reason. Filtering RAG results by
+    org would just reintroduce the same wrong exclusion in a new subsystem.
+    """
+    if user_id is None or not candidate_ids:
+        return set()
+
+    pool = await get_ai_readonly_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT set_config('app.user_id', $1, true)", str(user_id))
+            rows = await conn.fetch(
+                "SELECT id FROM ai.v_rag_source WHERE id = ANY($1::bigint[])", candidate_ids
+            )
+    return {r["id"] for r in rows}
